@@ -19,6 +19,8 @@ provider "azurerm" {
       purge_soft_delete_on_destroy = true
     }
   }
+  # Tell Terraform not to try and modify the whole subscription
+  skip_provider_registration = true 
 }
 
 # 1. Fetch the Resource Group
