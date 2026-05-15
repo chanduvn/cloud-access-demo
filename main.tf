@@ -7,7 +7,7 @@ terraform {
   }
   backend "azurerm" {
     resource_group_name  = "rg-terraform-state-demo"
-    storage_account_name = "tfstatedemostorage2026" # Use your unique name
+    storage_account_name = "tfstatedemostorage001" # Use your unique name
     container_name       = "tfstate"
     key                  = "prod.terraform.tfstate"
   }
