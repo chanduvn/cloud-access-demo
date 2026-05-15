@@ -30,14 +30,30 @@ jobs:
   terraform-apply:
     name: 'Terraform Apply (Production)'
     runs-on: ubuntu-latest
-    # This job only runs when code is merged to main
     if: github.event_name == 'push'
-    environment: Production # This triggers the manual approval gate in GitHub
-    
+    environment: Production
     steps:
     - uses: actions/checkout@v4
+    
     - uses: hashicorp/setup-terraform@v3
     - name: Terraform Init
       run: terraform init
     - name: Terraform Apply
       run: terraform apply -auto-approve
+      
+    # NEW: Log into Azure using our Service Principal secrets
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+        
+    # NEW: Zip the src folder and deploy it to the new Web App
+    - name: Deploy Web App Code
+      run: |
+        cd src
+        zip -r ../app.zip .
+        cd ..
+        # Find the name of the Web App dynamically (since we used a random ID)
+        APP_NAME=$(az webapp list --resource-group rg-cloud-access-demo --query "[0].name" -o tsv)
+        echo "Deploying to Web App: $APP_NAME"
+        az webapp deployment source config-zip --resource-group rg-cloud-access-demo --name $APP_NAME --src app.zip
