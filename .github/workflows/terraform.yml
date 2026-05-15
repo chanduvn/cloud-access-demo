@@ -1,35 +1,43 @@
-name: 'Terraform Deploy'
+name: 'Enterprise Terraform CI/CD'
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
 
 jobs:
-  terraform:
-    name: 'Terraform'
+  terraform-plan:
+    name: 'Terraform Plan (PR Check)'
     runs-on: ubuntu-latest
-
-    # Set up the environment variables using the GitHub Secrets
-    env:
-      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-
+    # This job runs on Pull Requests to show what *would* happen
+    if: github.event_name == 'pull_request'
+    
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-
+    - uses: actions/checkout@v4
+    - uses: hashicorp/setup-terraform@v3
     - name: Terraform Init
       run: terraform init
-
     - name: Terraform Plan
-      run: terraform plan -out=tfplan
+      run: terraform plan -no-color
 
+  terraform-apply:
+    name: 'Terraform Apply (Production)'
+    runs-on: ubuntu-latest
+    # This job only runs when code is merged to main
+    if: github.event_name == 'push'
+    environment: Production # This triggers the manual approval gate in GitHub
+    
+    steps:
+    - uses: actions/checkout@v4
+    - uses: hashicorp/setup-terraform@v3
+    - name: Terraform Init
+      run: terraform init
     - name: Terraform Apply
-      if: github.ref == 'refs/heads/main'
-      run: terraform apply -auto-approve tfplan
+      run: terraform apply -auto-approve
