@@ -235,6 +235,19 @@ resource "azurerm_key_vault_secret" "example" {
 
 To avoid state file conflicts (like Azure's Key Vault "Soft Delete" protections) and ensure your demo environment is wiped cleanly, **always tear down the infrastructure using code, never via the Azure Portal**.
 
+### Pre-requisite: Set Your User Object ID
+
+Before your first deployment, update the hardcoded **operator Object ID** in `main.tf` so that your local user has Key Vault access (required for `terraform destroy` to work locally).
+
+1. Find your Object ID:
+   ```bash
+   az ad signed-in-user show --query "id" -o tsv
+   ```
+2. In `main.tf`, locate the second `access_policy` block inside `azurerm_key_vault` and replace the existing Object ID with yours:
+   ```hcl
+   object_id = "<YOUR_OBJECT_ID_HERE>"
+   ```
+
 From your local terminal:
 1. Initialise the remote backend locally:
    ```bash

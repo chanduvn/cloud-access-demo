@@ -42,9 +42,19 @@ resource "azurerm_key_vault" "vault" {
   tenant_id           = data.azurerm_client_config.current.tenant_id
   sku_name            = "standard"
 
+  # Access for whoever runs Terraform (Service Principal in CI)
   access_policy {
     tenant_id = data.azurerm_client_config.current.tenant_id
     object_id = data.azurerm_client_config.current.object_id
+    secret_permissions = ["Get", "List", "Set", "Delete"]
+  }
+
+  # Access for the demo operator (so terraform destroy works locally)
+  # IMPORTANT: Replace this Object ID with your own Azure AD User Object ID.
+  # Find yours by running: az ad signed-in-user show --query "id" -o tsv
+  access_policy {
+    tenant_id          = data.azurerm_client_config.current.tenant_id
+    object_id          = "39d8aa62-87be-4e64-9179-f0411bc70650"
     secret_permissions = ["Get", "List", "Set", "Delete"]
   }
 }
@@ -131,4 +141,23 @@ resource "azurerm_key_vault_access_policy" "webapp_policy" {
   object_id    = azurerm_linux_web_app.app.identity[0].principal_id
 
   secret_permissions = ["Get"]
+}
+
+# ---------------------------------------------------------
+# OUTPUTS — used by the pipeline to pass values to scripts
+# ---------------------------------------------------------
+output "sql_server_fqdn" {
+  description = "Fully qualified domain name of the Azure SQL Server"
+  value       = azurerm_mssql_server.sql.fully_qualified_domain_name
+}
+
+output "db_username" {
+  description = "SQL Server administrator login"
+  value       = azurerm_mssql_server.sql.administrator_login
+}
+
+output "db_password" {
+  description = "SQL Server administrator password (from Key Vault)"
+  value       = azurerm_key_vault_secret.example.value
+  sensitive   = true
 }

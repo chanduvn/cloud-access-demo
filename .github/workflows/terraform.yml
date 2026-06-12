@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch: # Allows manual trigger from the GitHub Actions UI
+    inputs:
+      job:
+        description: 'Which job to run'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - safeguard-test
 
 env:
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -31,7 +40,7 @@ jobs:
   terraform-apply:
     name: 'Terraform Apply (Production)'
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'deploy')
     environment: Production
     steps:
     - uses: actions/checkout@v4
@@ -61,3 +70,81 @@ jobs:
         az webapp restart --resource-group rg-cloud-access-demo --name $APP_NAME
         sleep 30
         az webapp deploy --resource-group rg-cloud-access-demo --name $APP_NAME --src-path app.zip --type zip --timeout 600
+
+    # Decode base64-encoded certificate secrets into temp files for Safeguard auth.
+    # For a lab appliance with a self-signed cert, leave SAFEGUARD_CA_PEM secret empty
+    # and set SAFEGUARD_CA_FILE to 'insecure' in the env block below.
+    - name: Write Safeguard Certificates
+      run: |
+        echo "${{ secrets.SAFEGUARD_CERT_PEM }}" | base64 -d > /tmp/sg-cert.pem
+        echo "${{ secrets.SAFEGUARD_CERT_KEY }}" | base64 -d > /tmp/sg-key.pem
+        # Only write CA file if the secret is populated (not needed for insecure mode)
+        if [ -n "${{ secrets.SAFEGUARD_CA_PEM }}" ]; then
+          echo "${{ secrets.SAFEGUARD_CA_PEM }}" | base64 -d > /tmp/sg-ca.pem
+        fi
+        chmod 600 /tmp/sg-cert.pem /tmp/sg-key.pem
+
+    # Capture SQL Server FQDN and password directly from Terraform outputs —
+    # no need to set SQL_SERVER_FQDN or DB_INITIAL_PASSWORD as GitHub secrets.
+    - name: Register SQL Asset in Safeguard
+      env:
+        SAFEGUARD_HOST:      ${{ secrets.SAFEGUARD_HOST }}
+        SAFEGUARD_CERT_FILE: /tmp/sg-cert.pem
+        SAFEGUARD_KEY_FILE:  /tmp/sg-key.pem
+        # To use a trusted CA cert: set SAFEGUARD_CA_FILE to /tmp/sg-ca.pem
+        # For a self-signed lab appliance: set SAFEGUARD_CA_FILE to 'insecure'
+        SAFEGUARD_CA_FILE:   /tmp/sg-ca.pem
+      run: |
+        pip install -r scripts/requirements.txt --quiet
+        # Read FQDN and password straight from Terraform state — no extra secrets needed
+        export SQL_SERVER_FQDN=$(terraform output -raw sql_server_fqdn)
+        export DB_USERNAME=$(terraform output -raw db_username)
+        export DB_PASSWORD=$(terraform output -raw db_password)
+        python scripts/register-safeguard-asset.py
+
+    # Always clean up cert files so they are not left on the runner
+    - name: Clean Up Cert Files
+      if: always()
+      run: rm -f /tmp/sg-cert.pem /tmp/sg-key.pem /tmp/sg-ca.pem
+
+  # ---------------------------------------------------------
+  # SAFEGUARD TEST JOB — manually triggered only
+  # Use this to test Safeguard registration without running
+  # the full Terraform pipeline. Trigger via:
+  #   GitHub → Actions → Enterprise Terraform CI/CD → Run workflow
+  # ---------------------------------------------------------
+  safeguard-register-test:
+    name: 'Safeguard Registration (Test Only)'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'safeguard-test'
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Write Safeguard Certificates
+      run: |
+        echo "${{ secrets.SAFEGUARD_CERT_PEM }}" | base64 -d > /tmp/sg-cert.pem
+        echo "${{ secrets.SAFEGUARD_CERT_KEY }}" | base64 -d > /tmp/sg-key.pem
+        if [ -n "${{ secrets.SAFEGUARD_CA_PEM }}" ]; then
+          echo "${{ secrets.SAFEGUARD_CA_PEM }}" | base64 -d > /tmp/sg-ca.pem
+        fi
+        chmod 600 /tmp/sg-cert.pem /tmp/sg-key.pem
+
+    # For the test job, SQL_SERVER_FQDN and DB_PASSWORD are passed as secrets
+    # since Terraform state is not available here (no terraform apply was run).
+    - name: Register SQL Asset in Safeguard
+      env:
+        SAFEGUARD_HOST:      ${{ secrets.SAFEGUARD_HOST }}
+        SAFEGUARD_CERT_FILE: /tmp/sg-cert.pem
+        SAFEGUARD_KEY_FILE:  /tmp/sg-key.pem
+        # Change to 'insecure' for a self-signed lab appliance
+        SAFEGUARD_CA_FILE:   /tmp/sg-ca.pem
+        SQL_SERVER_FQDN:     ${{ secrets.SQL_SERVER_FQDN }}
+        DB_USERNAME:         sqladmin
+        DB_PASSWORD:         ${{ secrets.DB_INITIAL_PASSWORD }}
+      run: |
+        pip install -r scripts/requirements.txt --quiet
+        python scripts/register-safeguard-asset.py
+
+    - name: Clean Up Cert Files
+      if: always()
+      run: rm -f /tmp/sg-cert.pem /tmp/sg-key.pem /tmp/sg-ca.pem
