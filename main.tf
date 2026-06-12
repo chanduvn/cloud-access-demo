@@ -61,7 +61,7 @@ resource "azurerm_key_vault_secret" "example" {
 resource "azurerm_mssql_server" "sql" {
   name                         = "sql-demo-${random_id.vault_id.hex}"
   resource_group_name          = azurerm_resource_group.demo.name
-  location                     = "eastus"  # uksouth has provisioning restrictions on this subscription
+  location                     = "centralus"  # Most regions blocked for MSDN subs - centralus confirmed working
   version                      = "12.0"
   administrator_login          = "sqladmin"
   
