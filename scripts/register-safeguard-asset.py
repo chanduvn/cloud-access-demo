@@ -5,7 +5,11 @@ Authentication uses a certificate user (PEM + KEY files), which is the recommend
 method for non-human/CI-CD processes.
 
 Required environment variables:
-  SAFEGUARD_HOST       - Safeguard appliance hostname or IP
+  SAFEGUARD_HOST       - Safeguard appliance hostname or IP, optionally with port.
+                         Accepted formats:
+                           services-emea.skytap.com          (default port 443)
+                           services-emea.skytap.com:10097    (custom port)
+                           https://services-emea.skytap.com  (https:// prefix is stripped)
   SAFEGUARD_CERT_FILE  - Path to the certificate .pem file for the cert user
   SAFEGUARD_KEY_FILE   - Path to the private key .key file for the cert user
   SAFEGUARD_CA_FILE    - Path to the appliance CA certificate for TLS verification
@@ -28,6 +32,32 @@ def get_required_env(name: str) -> str:
         print(f"ERROR: Required environment variable '{name}' is not set.")
         sys.exit(1)
     return value
+
+
+def parse_host(raw: str) -> tuple[str, int]:
+    """
+    Parse SAFEGUARD_HOST into (hostname, port).
+    Strips https:// or http:// prefix if present.
+    Extracts port if specified (e.g. host:10097), defaults to 443.
+    """
+    host = raw.strip()
+    # Strip scheme if someone included it
+    for scheme in ("https://", "http://"):
+        if host.lower().startswith(scheme):
+            host = host[len(scheme):]
+            break
+    # Split host and optional port
+    if ":" in host:
+        hostname, port_str = host.rsplit(":", 1)
+        try:
+            port = int(port_str)
+        except ValueError:
+            print(f"ERROR: Invalid port in SAFEGUARD_HOST: '{port_str}'")
+            sys.exit(1)
+    else:
+        hostname = host
+        port = 443
+    return hostname, port
 
 
 def find_sql_platform(client: SafeguardClient) -> int:
@@ -114,7 +144,7 @@ def set_account_password(client: SafeguardClient, account_id: int, password: str
 
 
 def main():
-    host        = get_required_env("SAFEGUARD_HOST")
+    host_raw    = get_required_env("SAFEGUARD_HOST")
     cert_file   = get_required_env("SAFEGUARD_CERT_FILE")
     key_file    = get_required_env("SAFEGUARD_KEY_FILE")
     ca_file_raw = get_required_env("SAFEGUARD_CA_FILE")
@@ -122,20 +152,22 @@ def main():
     username    = get_required_env("DB_USERNAME")
     password    = get_required_env("DB_PASSWORD")
 
+    host, port = parse_host(host_raw)
+
     # 'insecure' disables TLS verification — only for dev/lab appliances
     verify = False if ca_file_raw.lower() == "insecure" else ca_file_raw
     if verify is False:
         print("WARNING: TLS certificate verification is DISABLED. "
               "Do not use 'insecure' in production.")
 
-    print(f"\nConnecting to Safeguard appliance: {host}")
+    print(f"\nConnecting to Safeguard appliance: {host}:{port}")
     print(f"  Certificate file : {cert_file}")
     print(f"  TLS verification : {'disabled' if verify is False else ca_file_raw}")
     print(f"  SQL Server FQDN  : {fqdn}")
     print(f"  DB username      : {username}\n")
 
     try:
-        with SafeguardClient(host, auth=CertificateAuth(cert_file, key_file), verify=verify) as client:
+        with SafeguardClient(host, port=port, auth=CertificateAuth(cert_file, key_file), verify=verify) as client:
             print("Connected to Safeguard.\n")
 
             platform_id = find_sql_platform(client)
