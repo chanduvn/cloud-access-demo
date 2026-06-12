@@ -78,9 +78,12 @@ jobs:
       run: |
         echo "${{ secrets.SAFEGUARD_CERT_PEM }}" | base64 -d > /tmp/sg-cert.pem
         echo "${{ secrets.SAFEGUARD_CERT_KEY }}" | base64 -d > /tmp/sg-key.pem
-        # Only write CA file if the secret is populated (not needed for insecure mode)
+        # Set CA file path dynamically: use the cert if provided, otherwise use insecure mode
         if [ -n "${{ secrets.SAFEGUARD_CA_PEM }}" ]; then
           echo "${{ secrets.SAFEGUARD_CA_PEM }}" | base64 -d > /tmp/sg-ca.pem
+          echo "SAFEGUARD_CA_FILE=/tmp/sg-ca.pem" >> $GITHUB_ENV
+        else
+          echo "SAFEGUARD_CA_FILE=insecure" >> $GITHUB_ENV
         fi
         chmod 600 /tmp/sg-cert.pem /tmp/sg-key.pem
 
@@ -91,9 +94,7 @@ jobs:
         SAFEGUARD_HOST:      ${{ secrets.SAFEGUARD_HOST }}
         SAFEGUARD_CERT_FILE: /tmp/sg-cert.pem
         SAFEGUARD_KEY_FILE:  /tmp/sg-key.pem
-        # To use a trusted CA cert: set SAFEGUARD_CA_FILE to /tmp/sg-ca.pem
-        # For a self-signed lab appliance: set SAFEGUARD_CA_FILE to 'insecure'
-        SAFEGUARD_CA_FILE:   /tmp/sg-ca.pem
+        # SAFEGUARD_CA_FILE is set dynamically by the previous step
       run: |
         pip install -r scripts/requirements.txt --quiet
         # Read FQDN and password straight from Terraform state — no extra secrets needed
@@ -126,6 +127,9 @@ jobs:
         echo "${{ secrets.SAFEGUARD_CERT_KEY }}" | base64 -d > /tmp/sg-key.pem
         if [ -n "${{ secrets.SAFEGUARD_CA_PEM }}" ]; then
           echo "${{ secrets.SAFEGUARD_CA_PEM }}" | base64 -d > /tmp/sg-ca.pem
+          echo "SAFEGUARD_CA_FILE=/tmp/sg-ca.pem" >> $GITHUB_ENV
+        else
+          echo "SAFEGUARD_CA_FILE=insecure" >> $GITHUB_ENV
         fi
         chmod 600 /tmp/sg-cert.pem /tmp/sg-key.pem
 
@@ -136,8 +140,7 @@ jobs:
         SAFEGUARD_HOST:      ${{ secrets.SAFEGUARD_HOST }}
         SAFEGUARD_CERT_FILE: /tmp/sg-cert.pem
         SAFEGUARD_KEY_FILE:  /tmp/sg-key.pem
-        # Change to 'insecure' for a self-signed lab appliance
-        SAFEGUARD_CA_FILE:   /tmp/sg-ca.pem
+        # SAFEGUARD_CA_FILE is set dynamically by the previous step
         SQL_SERVER_FQDN:     ${{ secrets.SQL_SERVER_FQDN }}
         DB_USERNAME:         sqladmin
         DB_PASSWORD:         ${{ secrets.DB_INITIAL_PASSWORD }}
