@@ -57,4 +57,7 @@ jobs:
         # Find the name of the Web App dynamically (since we used a random ID)
         APP_NAME=$(az webapp list --resource-group rg-cloud-access-demo --query "[0].name" -o tsv)
         echo "Deploying to Web App: $APP_NAME"
-        az webapp deployment source config-zip --resource-group rg-cloud-access-demo --name $APP_NAME --src app.zip
+        # Restart the app first to ensure it's warm before deploying
+        az webapp restart --resource-group rg-cloud-access-demo --name $APP_NAME
+        sleep 30
+        az webapp deploy --resource-group rg-cloud-access-demo --name $APP_NAME --src-path app.zip --type zip --timeout 600
