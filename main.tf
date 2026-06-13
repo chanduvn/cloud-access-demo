@@ -46,7 +46,7 @@ resource "azurerm_key_vault" "vault" {
   access_policy {
     tenant_id = data.azurerm_client_config.current.tenant_id
     object_id = data.azurerm_client_config.current.object_id
-    secret_permissions = ["Get", "List", "Set", "Delete"]
+    secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
   }
 
   # Access for the demo operator (so terraform destroy works locally)
@@ -55,7 +55,7 @@ resource "azurerm_key_vault" "vault" {
   access_policy {
     tenant_id          = data.azurerm_client_config.current.tenant_id
     object_id          = "39d8aa62-87be-4e64-9179-f0411bc70650"
-    secret_permissions = ["Get", "List", "Set", "Delete"]
+    secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
   }
 }
 
