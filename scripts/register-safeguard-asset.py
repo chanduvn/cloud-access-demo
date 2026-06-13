@@ -34,30 +34,47 @@ def get_required_env(name: str) -> str:
     return value
 
 
-def parse_host(raw: str) -> tuple[str, int]:
+def parse_host(raw: str) -> str:
     """
-    Parse SAFEGUARD_HOST into (hostname, port).
-    Strips https:// or http:// prefix if present.
-    Extracts port if specified (e.g. host:10097), defaults to 443.
+    Parse SAFEGUARD_HOST into a clean 'hostname:port' string.
+    Strips https:// or http:// prefix and trailing slashes if present.
+    Port defaults to 443 if not specified.
+    PySafeguard expects the host as a plain string (no scheme).
     """
-    host = raw.strip()
+    host = raw.strip().rstrip("/")
     # Strip scheme if someone included it
     for scheme in ("https://", "http://"):
         if host.lower().startswith(scheme):
             host = host[len(scheme):]
             break
-    # Split host and optional port
+    host = host.rstrip("/")
+    # Validate port if present
     if ":" in host:
         hostname, port_str = host.rsplit(":", 1)
         try:
-            port = int(port_str)
+            int(port_str)
         except ValueError:
             print(f"ERROR: Invalid port in SAFEGUARD_HOST: '{port_str}'")
             sys.exit(1)
-    else:
-        hostname = host
-        port = 443
-    return hostname, port
+    # Return as-is — PySafeguard accepts 'host:port' directly
+    return host
+
+
+def find_asset_partition(client: SafeguardClient) -> int:
+    """Find the default (non-system) asset partition ID."""
+    print("Looking up asset partition...")
+    partitions = client.get(
+        Service.CORE,
+        "AssetPartitions",
+        params={"fields": "Id,Name"}
+    ).json()
+    # Skip the system partition (Id=-1), use the first real one
+    for p in partitions:
+        if p["Id"] != -1:
+            print(f"  Using partition: '{p['Name']}' (Id={p['Id']})")
+            return p["Id"]
+    print("ERROR: No usable asset partition found in Safeguard.")
+    sys.exit(1)
 
 
 def find_sql_platform(client: SafeguardClient) -> int:
@@ -84,7 +101,7 @@ def find_sql_platform(client: SafeguardClient) -> int:
     return platforms[0]["Id"]
 
 
-def find_or_create_asset(client: SafeguardClient, fqdn: str, platform_id: int) -> dict:
+def find_or_create_asset(client: SafeguardClient, fqdn: str, platform_id: int, partition_id: int) -> dict:
     """Find an existing asset by network address or create a new one."""
     print(f"Checking if asset '{fqdn}' already exists in Safeguard...")
     existing = client.get(
@@ -103,8 +120,12 @@ def find_or_create_asset(client: SafeguardClient, fqdn: str, platform_id: int) -
         "Name": fqdn,
         "NetworkAddress": fqdn,
         "PlatformId": platform_id,
+        "AssetPartitionId": partition_id,
         "Description": "Azure SQL Server — registered by CI/CD pipeline (cloud-access-demo)"
     }).json()
+    if "Code" in asset:
+        print(f"  ERROR creating asset: {asset.get('Message')} — {asset.get('ModelState')}")
+        sys.exit(1)
     print(f"  Asset created: '{asset['Name']}' (Id={asset['Id']})")
     return asset
 
@@ -128,10 +149,13 @@ def find_or_create_account(client: SafeguardClient, asset_id: int, username: str
 
     print(f"  Creating account '{username}'...")
     account = client.post(Service.CORE, "AssetAccounts", json={
-        "AssetId": asset_id,
+        "Asset": {"Id": asset_id},
         "Name": username,
         "Description": "SQL admin account — managed by CI/CD pipeline"
     }).json()
+    if "Code" in account:
+        print(f"  ERROR creating account: {account.get('Message')} — {account.get('ModelState')}")
+        sys.exit(1)
     print(f"  Account created: '{account['Name']}' (Id={account['Id']})")
     return account
 
@@ -139,7 +163,7 @@ def find_or_create_account(client: SafeguardClient, asset_id: int, username: str
 def set_account_password(client: SafeguardClient, account_id: int, password: str) -> None:
     """Store the password for the account in Safeguard's vault."""
     print(f"Setting password for account Id={account_id}...")
-    client.put(Service.CORE, f"AssetAccounts/{account_id}/Password", data=password)
+    client.put(Service.CORE, f"AssetAccounts/{account_id}/Password", json=password)
     print("  Password stored successfully.")
 
 
@@ -152,7 +176,7 @@ def main():
     username    = get_required_env("DB_USERNAME")
     password    = get_required_env("DB_PASSWORD")
 
-    host, port = parse_host(host_raw)
+    host = parse_host(host_raw)
 
     # 'insecure' disables TLS verification — only for dev/lab appliances
     verify = False if ca_file_raw.lower() == "insecure" else ca_file_raw
@@ -160,19 +184,20 @@ def main():
         print("WARNING: TLS certificate verification is DISABLED. "
               "Do not use 'insecure' in production.")
 
-    print(f"\nConnecting to Safeguard appliance: {host}:{port}")
+    print(f"\nConnecting to Safeguard appliance: {host}")
     print(f"  Certificate file : {cert_file}")
     print(f"  TLS verification : {'disabled' if verify is False else ca_file_raw}")
     print(f"  SQL Server FQDN  : {fqdn}")
     print(f"  DB username      : {username}\n")
 
     try:
-        with SafeguardClient(host, port=port, auth=CertificateAuth(cert_file, key_file), verify=verify) as client:
+        with SafeguardClient(host, auth=CertificateAuth(cert_file, key_file), verify=verify) as client:
             print("Connected to Safeguard.\n")
 
-            platform_id = find_sql_platform(client)
-            asset       = find_or_create_asset(client, fqdn, platform_id)
-            account     = find_or_create_account(client, asset["Id"], username)
+            partition_id = find_asset_partition(client)
+            platform_id  = find_sql_platform(client)
+            asset        = find_or_create_asset(client, fqdn, platform_id, partition_id)
+            account      = find_or_create_account(client, asset["Id"], username)
             set_account_password(client, account["Id"], password)
 
             print(f"\nDone. SQL Server '{fqdn}' is registered in Safeguard.")
