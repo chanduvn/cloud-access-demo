@@ -1,260 +1,475 @@
-# Enterprise Azure CI/CD Pipeline with Terraform & GitHub Actions
+# Cloud Access Demo — Two-Pipeline CI/CD with Terraform & GitHub Actions
 
-This guide provides step-by-step instructions for establishing a secure, enterprise-grade Continuous Integration and Continuous Deployment (CI/CD) pipeline. It bridges GitHub Actions and Microsoft Azure using Terraform as the Infrastructure-as-Code (IaC) engine. 
+This project deploys a Flask web application backed by Azure SQL, using two separate CI/CD pipelines:
 
-This baseline introduces intentional security "traps" (e.g., hardcoded static secrets and manual approval gates tied to specific individuals) designed to be solved later by introducing governance and security tools like **One Identity Safeguard** and **Identity Manager**.
+| Pipeline | File | Purpose |
+|---|---|---|
+| **Day 0 — Infrastructure** | `.github/workflows/infra.yml` | Provisions all Azure resources (Resource Group, Key Vault, SQL Server, App Service) using Terraform |
+| **Day 2 — Application** | `.github/workflows/app.yml` | Deploys the Python/Flask application code to the existing Azure Web App |
 
----
-
-## Prerequisites
-
-Before beginning, ensure you have the following ready:
-1. **Azure Subscription**: An active subscription (e.g., Visual Studio Professional) with permissions to create Resource Groups, Storage Accounts, Key Vaults, and Role Assignments.
-2. **GitHub Account**: A GitHub account to host the repository and run GitHub Actions.
-3. **Local Tools**:
-   - [Azure CLI](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli)
-   - [Terraform](https://developer.hashicorp.com/terraform/downloads)
-   - [Git](https://git-scm.com/downloads)
-   - A code editor (e.g., VS Code)
+This guide assumes **you are starting completely from scratch** — no GitHub account, no Azure account, no tools installed. Follow every step in order.
 
 ---
 
-## Phase 1: Local Authentication & Resource Group Setup
+## Table of Contents
 
-First, authenticate your local terminal with Azure and create the primary target resource group where your application infrastructure will live.
-
-1. Open your terminal (PowerShell/Bash) and log into Azure:
-   ```bash
-   az login
-   ```
-2. Set your active subscription (replace `<YOUR_SUBSCRIPTION_ID>` with your actual ID):
-   ```bash
-   az account set --subscription="<YOUR_SUBSCRIPTION_ID>"
-   ```
-3. Create the target resource group:
-   ```bash
-   az group create --name "rg-cloud-access-demo" --location "uksouth"
-   ```
-
----
-
-## Phase 2: Establish the "Bridge Identity" (Service Principal)
-
-Your CI/CD pipeline needs a non-human identity (a Service Principal) to authenticate to Azure securely.
-
-1. Create the Service Principal and assign it "Contributor" rights to your primary resource group:
-   ```bash
-   az ad sp create-for-rbac --name "Demo-Safeguard-Bridge-SP" --role Contributor --scopes /subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-cloud-access-demo
-   ```
-2. **Save the Output!** The command will return a JSON block. Securely save the `appId`, `password`, and `tenant` values. You will need them for GitHub Secrets.
+1. [What You'll Build](#1-what-youll-build)
+2. [Install Required Tools](#2-install-required-tools)
+3. [Create a GitHub Account](#3-create-a-github-account)
+4. [Set Up Your Azure Account](#4-set-up-your-azure-account)
+5. [Log In to Azure from Your Terminal](#5-log-in-to-azure-from-your-terminal)
+6. [Create a Service Principal (Pipeline Identity)](#6-create-a-service-principal-pipeline-identity)
+7. [Set Up Terraform Remote State Storage](#7-set-up-terraform-remote-state-storage)
+8. [Grant the Service Principal Access to the State Storage](#8-grant-the-service-principal-access-to-the-state-storage)
+9. [Create Your GitHub Repository](#9-create-your-github-repository)
+10. [Add Azure Secrets to GitHub](#10-add-azure-secrets-to-github)
+11. [Create the Production Environment Gate](#11-create-the-production-environment-gate)
+12. [Push Your Code to GitHub](#12-push-your-code-to-github)
+13. [Run the Day 0 Infrastructure Pipeline](#13-run-the-day-0-infrastructure-pipeline)
+14. [Run the Day 2 Application Pipeline](#14-run-the-day-2-application-pipeline)
+15. [Verify Everything in Azure](#15-verify-everything-in-azure)
+16. [Clean Teardown](#16-clean-teardown)
 
 ---
 
-## Phase 3: The Enterprise Foundation (Remote State)
+## 1. What You'll Build
 
-Enterprise Terraform never stores its memory (`tfstate` file) locally. It must be locked in a central Azure Storage Account to prevent corruption and enable automation.
+The **Day 0 pipeline** creates the following Azure resources:
 
-1. Create a dedicated resource group for the state file:
-   ```bash
-   az group create --name "rg-terraform-state-demo" --location "uksouth"
-   ```
-2. Create the Storage Account (the name must be globally unique; append random numbers if it fails):
-   ```bash
-   az storage account create --name "tfstatedemostorage001" --resource-group "rg-terraform-state-demo" --location "uksouth" --sku Standard_LRS
-   ```
-3. Create the Blob Container inside the storage account:
-   ```bash
-   az storage container create --name "tfstate" --account-name "tfstatedemostorage001"
-   ```
-4. **Critical Step (RBAC)**: Grant your new Service Principal permission to read/write to this state file resource group. Replace `<SP_OBJECT_ID>` with the Object ID of your Service Principal (found in Entra ID):
-   ```bash
-   az role assignment create --assignee "<SP_OBJECT_ID>" --role "Contributor" --scope "/subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-terraform-state-demo"
-   ```
+- **Resource Group** (`rg-cloud-access-demo`) — a logical container for all resources
+- **Key Vault** — stores the database password as a secret
+- **Azure SQL Server & Database** — the backend database
+- **App Service Plan + Linux Web App** — hosts the Flask application
+- **Firewall rules & access policies** — wires everything together securely
+
+The **Day 2 pipeline** takes the Flask app in `src/` and deploys it to the Web App created by Day 0.
+
+The Web App reads the database password from Key Vault at runtime using a native Key Vault Reference — the secret is never exposed in application config.
 
 ---
 
-## Phase 4: GitHub Repository Configuration
+## 2. Install Required Tools
 
-Now, prepare your GitHub repository to securely store the code and enforce deployment rules.
+Install these on your local machine before continuing.
 
-1. **Create a Repository**: Create a new repository on GitHub.
-   - *Note: If using a free GitHub account, set the repository visibility to **Public** to access Environment Protection rules.*
-2. **Configure the Production Environment Gate**:
-   - Go to **Settings > Environments** and create a new environment named `Production`.
-   - Under **Environment protection rules**, check **Required reviewers**.
-   - Add your own GitHub username as the reviewer. *(This establishes the "Approval Trap" that Identity Manager will later solve).*
-3. **Configure GitHub Secrets**:
-   - Go to **Settings > Secrets and variables > Actions**.
-   - Add the following **Repository secrets** using the JSON output you saved in Phase 2:
-     - `AZURE_CLIENT_ID`: (Your `appId`)
-     - `AZURE_CLIENT_SECRET`: (Your `password`)
-     - `AZURE_TENANT_ID`: (Your `tenant`)
-     - `AZURE_SUBSCRIPTION_ID`: (Your Subscription ID)
+### Git
+Git is a version control tool. You'll use it to push your code to GitHub.
+
+1. Download from [https://git-scm.com/downloads](https://git-scm.com/downloads)
+2. Run the installer — accept all defaults
+3. Verify it works:
+   ```bash
+   git --version
+   ```
+
+### Azure CLI
+The Azure CLI lets you manage Azure resources from your terminal.
+
+1. Download from [https://learn.microsoft.com/en-us/cli/azure/install-azure-cli](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
+2. Run the installer — accept all defaults
+3. **Close and reopen your terminal**, then verify:
+   ```bash
+   az --version
+   ```
+
+### Terraform
+Terraform is an infrastructure-as-code tool that creates Azure resources from `.tf` files.
+
+1. Download from [https://developer.hashicorp.com/terraform/downloads](https://developer.hashicorp.com/terraform/downloads)
+2. Extract the `terraform.exe` (or binary) to a folder on your PATH
+3. Verify:
+   ```bash
+   terraform --version
+   ```
+
+### VS Code (recommended)
+1. Download from [https://code.visualstudio.com/](https://code.visualstudio.com/)
 
 ---
 
-## Phase 5: The Codebase
+## 3. Create a GitHub Account
 
-Set up your local repository to mirror your GitHub repository, and create the two foundational files.
+If you already have a GitHub account, skip this step.
 
-### 1. The GitHub Actions Workflow
-In your project folder, create the directory structure `.github/workflows/` and add a file named `terraform.yml`:
+1. Go to [https://github.com](https://github.com)
+2. Click **Sign up**
+3. Enter your email, create a password, choose a username
+4. Complete the verification puzzle and confirm your email
+5. You're now logged in to GitHub
 
-```yaml
-name: 'Enterprise Terraform CI/CD'
+---
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+## 4. Set Up Your Azure Account
 
-env:
-  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+If you already have an Azure subscription, skip this step.
 
-jobs:
-  terraform-plan:
-    name: 'Terraform Plan (PR Check)'
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-    - uses: actions/checkout@v4
-    - uses: hashicorp/setup-terraform@v3
-    - name: Terraform Init
-      run: terraform init
-    - name: Terraform Plan
-      run: terraform plan -no-color
+1. Go to [https://azure.microsoft.com/en-us/free/](https://azure.microsoft.com/en-us/free/)
+2. Click **Start free** and sign in with a Microsoft account (or create one)
+3. Enter your details and payment info (you won't be charged for the free tier)
+4. Once created, go to [https://portal.azure.com](https://portal.azure.com)
+5. In the search bar at the top, type **Subscriptions** and click on it
+6. Note down your **Subscription ID** — you'll need it repeatedly. It looks like: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
 
-  terraform-apply:
-    name: 'Terraform Apply (Production)'
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    environment: Production
-    steps:
-    - uses: actions/checkout@v4
-    - uses: hashicorp/setup-terraform@v3
-    - name: Terraform Init
-      run: terraform init
-    - name: Terraform Apply
-      run: terraform apply -auto-approve
+---
+
+## 5. Log In to Azure from Your Terminal
+
+Open PowerShell (Windows) or Terminal (Mac/Linux):
+
+```bash
+az login
 ```
 
-### 2. The Terraform Configuration
-In the root of your project folder, create `main.tf`. Be sure to update the `storage_account_name` to match the one you created in Phase 3:
+A browser window will open. Sign in with the same Microsoft account you used for Azure. Once logged in, you'll see a list of your subscriptions in the terminal.
 
-```hcl
-terraform {
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 3.0"
-    }
-  }
-  backend "azurerm" {
-    resource_group_name  = "rg-terraform-state-demo"
-    storage_account_name = "tfstatedemostorage001" # Update this!
-    container_name       = "tfstate"
-    key                  = "prod.terraform.tfstate"
-  }
-}
+Set your active subscription (replace the placeholder with your real Subscription ID):
 
-provider "azurerm" {
-  features {
-    key_vault {
-      purge_soft_delete_on_destroy = true
-    }
-  }
-  skip_provider_registration = true
-}
+```bash
+az account set --subscription="<YOUR_SUBSCRIPTION_ID>"
+```
 
-# The target resource group
-resource "azurerm_resource_group" "demo" {
-  name     = "rg-cloud-access-demo"
-  location = "uksouth"
-}
+Verify you're on the right subscription:
 
-# Fetch the details of the currently logged-in identity (GitHub Actions SP)
-data "azurerm_client_config" "current" {}
-
-resource "random_id" "vault_id" {
-  byte_length = 4
-}
-
-# Create the Key Vault
-resource "azurerm_key_vault" "vault" {
-  name                = "kv-demo-${random_id.vault_id.hex}"
-  location            = azurerm_resource_group.demo.location
-  resource_group_name = azurerm_resource_group.demo.name
-  tenant_id           = data.azurerm_client_config.current.tenant_id
-  sku_name            = "standard"
-
-  # Give the GitHub Actions Service Principal permission to write secrets
-  access_policy {
-    tenant_id = data.azurerm_client_config.current.tenant_id
-    object_id = data.azurerm_client_config.current.object_id
-    secret_permissions = ["Get", "List", "Set", "Delete"]
-  }
-}
-
-# The "Static Secret" Trap (To be solved by Safeguard)
-resource "azurerm_key_vault_secret" "example" {
-  name         = "database-password"
-  value        = "InitialStaticPassword123!"
-  key_vault_id = azurerm_key_vault.vault.id
-}
+```bash
+az account show --query "{Name:name, SubscriptionId:id}" -o table
 ```
 
 ---
 
-## Phase 6: Execution & Validation
+## 6. Create a Service Principal (Pipeline Identity)
 
-1. **Deploy to GitHub**:
-   Run the following commands in your terminal to push your code:
-   ```bash
-   git add .
-   git commit -m "feat: initial enterprise pipeline setup"
-   git push origin main
-   ```
-2. **Review and Approve**:
-   - Go to the **Actions** tab in your GitHub repository.
-   - Click on the running workflow. It will pause at the `terraform-apply` stage.
-   - Click **Review deployments**, check the `Production` box, and click **Approve and deploy**.
-3. **Verify in Azure**:
-   - Open the Azure Portal and navigate to `rg-cloud-access-demo`.
-   - Click on the new Key Vault (`kv-demo-...`).
-   - Navigate to **Objects > Secrets**.
-   - *Note:* By default, you will not have permission to view the secret. You must go to **Settings > Access policies**, click **+ Create**, give yourself "Get" and "List" Secret permissions, and select your human Azure account as the Principal.
-   - Once granted, you can view the `database-password` and see the hardcoded string `InitialStaticPassword123!`.
+GitHub Actions can't log in as *you*. It needs its own identity — called a **Service Principal** — to authenticate to Azure.
+
+### 6a. Create the target Resource Group first
+
+The Service Principal needs something to be scoped to. Create the resource group that Terraform will manage:
+
+```bash
+az group create --name "rg-cloud-access-demo" --location "uksouth"
+```
+
+### 6b. Create the Service Principal
+
+```bash
+az ad sp create-for-rbac --name "Demo-Pipeline-SP" --role Contributor --scopes /subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-cloud-access-demo
+```
+
+This outputs a JSON block like:
+
+```json
+{
+  "appId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "displayName": "Demo-Pipeline-SP",
+  "password": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "tenant": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}
+```
+
+> **CRITICAL**: Copy this output and save it somewhere safe (e.g., a temporary text file). The `password` is shown only once and cannot be retrieved later. You'll need all four values in Step 10.
+
+| JSON field | What it is | GitHub Secret name |
+|---|---|---|
+| `appId` | The Service Principal's client ID | `AZURE_CLIENT_ID` |
+| `password` | The Service Principal's password | `AZURE_CLIENT_SECRET` |
+| `tenant` | Your Azure AD tenant ID | `AZURE_TENANT_ID` |
+| *(from Step 5)* | Your Subscription ID | `AZURE_SUBSCRIPTION_ID` |
 
 ---
 
-## Phase 7: Clean Teardown
+## 7. Set Up Terraform Remote State Storage
 
-To avoid state file conflicts (like Azure's Key Vault "Soft Delete" protections) and ensure your demo environment is wiped cleanly, **always tear down the infrastructure using code, never via the Azure Portal**.
+Terraform tracks what infrastructure it has created in a **state file**. In a team/CI environment, this file must be stored centrally in Azure — never on a local machine.
 
-### Pre-requisite: Set Your User Object ID
+### 7a. Create a resource group for state storage
 
-Before your first deployment, update the hardcoded **operator Object ID** in `main.tf` so that your local user has Key Vault access (required for `terraform destroy` to work locally).
+```bash
+az group create --name "rg-terraform-state-demo" --location "uksouth"
+```
 
-1. Find your Object ID:
-   ```bash
-   az ad signed-in-user show --query "id" -o tsv
-   ```
-2. In `main.tf`, locate the second `access_policy` block inside `azurerm_key_vault` and replace the existing Object ID with yours:
-   ```hcl
-   object_id = "<YOUR_OBJECT_ID_HERE>"
-   ```
+### 7b. Create a Storage Account
 
-From your local terminal:
-1. Initialise the remote backend locally:
-   ```bash
-   terraform init
-   ```
-2. Destroy the infrastructure:
-   ```bash
-   terraform destroy -auto-approve
-   ```
-*(Note: Do not delete the `rg-terraform-state-demo` resource group. Leave the remote state backend intact so it is ready for your next deployment.)*
+The name must be **globally unique** across all of Azure (lowercase letters and numbers only, 3–24 characters). If the name is taken, change the numbers at the end:
+
+```bash
+az storage account create --name "tfstatedemostorage001" --resource-group "rg-terraform-state-demo" --location "uksouth" --sku Standard_LRS
+```
+
+### 7c. Create a Blob Container inside the Storage Account
+
+```bash
+az storage container create --name "tfstate" --account-name "tfstatedemostorage001"
+```
+
+> **Important**: If you changed the storage account name above, you must also update the `storage_account_name` value in `main.tf` to match.
+
+---
+
+## 8. Grant the Service Principal Access to the State Storage
+
+The Service Principal needs Contributor access to the state storage resource group too, otherwise the pipeline can't read or write the Terraform state.
+
+First, find the Service Principal's **Object ID** (this is different from `appId`):
+
+```bash
+az ad sp list --display-name "Demo-Pipeline-SP" --query "[0].id" -o tsv
+```
+
+Then grant it access:
+
+```bash
+az role assignment create --assignee "<SP_OBJECT_ID>" --role "Contributor" --scope "/subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-terraform-state-demo"
+```
+
+---
+
+## 9. Create Your GitHub Repository
+
+### 9a. Create the repository on GitHub
+
+1. Go to [https://github.com](https://github.com) and sign in
+2. Click the **+** icon in the top-right corner, then **New repository**
+3. Fill in:
+   - **Repository name**: `cloud-access-demo`
+   - **Visibility**: **Public** *(required for free accounts to use Environment protection rules)*
+   - **Do NOT** check "Add a README file" (you already have one)
+4. Click **Create repository**
+5. GitHub will show you a page with setup instructions — leave this page open, you'll need the URL
+
+### 9b. Connect your local folder to GitHub
+
+Open your terminal and navigate to your project folder:
+
+```bash
+cd c:\windsurf\Devops\cloud-access-demo
+```
+
+Initialise Git and push to GitHub (replace `<YOUR_GITHUB_USERNAME>` with your actual username):
+
+```bash
+git init
+git add .
+git commit -m "initial commit"
+git branch -M main
+git remote add origin https://github.com/<YOUR_GITHUB_USERNAME>/cloud-access-demo.git
+git push -u origin main
+```
+
+If prompted, sign in with your GitHub credentials.
+
+---
+
+## 10. Add Azure Secrets to GitHub
+
+The pipelines need your Azure credentials to run. These are stored as encrypted **Secrets** in GitHub — they are never visible in logs.
+
+1. In your GitHub repository, click **Settings** (the gear icon tab, far right)
+2. In the left sidebar, click **Secrets and variables** → **Actions**
+3. Click **New repository secret** and add each of the following (one at a time):
+
+| Secret name | Value (from Step 6) |
+|---|---|
+| `AZURE_CLIENT_ID` | The `appId` from the Service Principal output |
+| `AZURE_CLIENT_SECRET` | The `password` from the Service Principal output |
+| `AZURE_TENANT_ID` | The `tenant` from the Service Principal output |
+| `AZURE_SUBSCRIPTION_ID` | Your Azure Subscription ID (from Step 5) |
+
+When you're done, you should see all four secrets listed on the Actions secrets page.
+
+---
+
+## 11. Create the Production Environment Gate
+
+Both pipelines require manual approval before deploying. This is enforced through a GitHub **Environment**.
+
+1. In your repository, go to **Settings** → **Environments**
+2. Click **New environment**
+3. Name it exactly: `Production` (capital P — must match the workflow files)
+4. Click **Configure environment**
+5. Under **Environment protection rules**, check **Required reviewers**
+6. In the search box, type your own GitHub username and select it
+7. Click **Save protection rules**
+
+Now whenever either pipeline wants to deploy, it will pause and wait for you to click "Approve".
+
+---
+
+## 12. Push Your Code to GitHub
+
+If you've made any changes since the initial push (e.g., updating `main.tf` with your storage account name), push them now:
+
+```bash
+git add .
+git commit -m "configure pipelines and infrastructure"
+git push
+```
+
+---
+
+## 13. Run the Day 0 Infrastructure Pipeline
+
+The Day 0 pipeline provisions all Azure resources. It triggers automatically when `.tf` files are pushed, but you can also trigger it manually.
+
+### Automatic trigger
+If you just pushed changes to `main.tf`, the pipeline is already running. Go to:
+
+**Your repository → Actions tab**
+
+You'll see a workflow run called **"Day 0 — Infrastructure"**. Click on it.
+
+### Manual trigger
+If the pipeline didn't trigger (e.g., you didn't change any `.tf` files):
+
+1. Go to the **Actions** tab
+2. In the left sidebar, click **Day 0 — Infrastructure**
+3. Click the **Run workflow** button (top right)
+4. Select the `main` branch and click **Run workflow**
+
+### Approve the deployment
+1. The workflow will show a yellow "Waiting" badge on the **Terraform Apply** job
+2. Click **Review deployments**
+3. Check the **Production** box
+4. Click **Approve and deploy**
+
+Wait for the green checkmark. Your Azure infrastructure is now live.
+
+---
+
+## 14. Run the Day 2 Application Pipeline
+
+The Day 2 pipeline deploys the Flask app to the Web App created by Day 0.
+
+> **You must run Day 0 first.** Day 2 expects the Web App to already exist.
+
+### Manual trigger (first time)
+Since you may have pushed all code at once, trigger this manually:
+
+1. Go to the **Actions** tab
+2. In the left sidebar, click **Day 2 — Application**
+3. Click the **Run workflow** button
+4. Select the `main` branch and click **Run workflow**
+
+### Approve the deployment
+Same as Day 0 — click **Review deployments**, check **Production**, and approve.
+
+### Future runs
+After the first deployment, this pipeline will run automatically whenever you push changes to files in the `src/` folder.
+
+---
+
+## 15. Verify Everything in Azure
+
+1. Go to [https://portal.azure.com](https://portal.azure.com)
+2. In the search bar, type `rg-cloud-access-demo` and click on the Resource Group
+3. You should see these resources:
+   - **Key Vault** (`kv-demo-...`)
+   - **SQL Server** (`sql-demo-...`)
+   - **SQL Database** (`demodb`)
+   - **App Service Plan** (`asp-demo-...`)
+   - **Web App** (`app-demo-...`)
+4. Click on the **Web App** → **Browse** (or copy the URL from the Overview page)
+5. The Flask application should load, showing a form where you can submit messages to the database
+
+### Viewing Key Vault secrets (optional)
+By default, you won't have permission to view Key Vault secrets in the portal. To grant yourself access:
+
+1. Click on the Key Vault resource
+2. Go to **Settings → Access policies**
+3. Click **+ Create**
+4. Under **Secret permissions**, check **Get** and **List**
+5. Click **Next**, search for your own Azure account email, select it, and click **Create**
+6. Now go to **Objects → Secrets** and you can view the `database-password`
+
+---
+
+## 16. Clean Teardown
+
+To avoid unnecessary charges, destroy the infrastructure when you're done.
+
+### Pre-requisite: Set your User Object ID
+
+The `main.tf` file has a hardcoded operator Object ID for Key Vault access (needed for `terraform destroy` to work locally). Update it with your own ID:
+
+```bash
+az ad signed-in-user show --query "id" -o tsv
+```
+
+In `main.tf`, find the second `access_policy` block inside `azurerm_key_vault` and replace the Object ID with yours.
+
+### Destroy the infrastructure
+
+```bash
+terraform init
+terraform destroy -auto-approve
+```
+
+> **Do not delete** the `rg-terraform-state-demo` resource group. Leave the state storage intact so it's ready for your next deployment.
+
+---
+
+## Project Structure
+
+```
+cloud-access-demo/
+├── .github/
+│   └── workflows/
+│       ├── infra.yml          # Day 0 — Infrastructure pipeline
+│       └── app.yml            # Day 2 — Application pipeline
+├── src/
+│   ├── app.py                 # Flask application
+│   └── requirements.txt       # Python dependencies (Flask, pyodbc)
+├── scripts/
+│   ├── register-safeguard-asset.py  # (Future use — Safeguard integration)
+│   └── requirements.txt             # (Future use — pysafeguard)
+├── main.tf                    # Terraform infrastructure definition
+└── readme.md                  # This file
+```
+
+---
+
+## How the Pipelines Work
+
+### Day 0 — Infrastructure (`infra.yml`)
+
+```
+Push *.tf to main  ──→  Terraform Plan  ──→  Approval Gate  ──→  Terraform Apply
+                                                                      │
+                                                             Creates: Key Vault
+                                                                      SQL Server
+                                                                      Web App
+                                                                      etc.
+```
+
+- **Triggers on**: changes to `*.tf` files, or manual dispatch
+- **Pull Requests**: runs `terraform plan` to preview changes (no approval needed)
+- **Push to main**: runs `terraform apply` after manual approval
+- **Authentication**: uses `ARM_*` environment variables set from GitHub Secrets
+
+### Day 2 — Application (`app.yml`)
+
+```
+Push src/* to main  ──→  Validate App  ──→  Approval Gate  ──→  Deploy to Web App
+```
+
+- **Triggers on**: changes to `src/**` files, or manual dispatch
+- **Pull Requests**: installs dependencies and runs a syntax check
+- **Push to main**: zips and deploys the app to Azure after manual approval
+- **Authentication**: uses `az login` with the same Service Principal credentials
+
+---
+
+## Troubleshooting
+
+### "Terraform init failed — storage account not found"
+You either haven't created the storage account (Step 7), or the name in `main.tf` doesn't match. Check the `storage_account_name` in the `backend "azurerm"` block.
+
+### "The client does not have authorization to perform action"
+The Service Principal doesn't have Contributor access to one of the resource groups. Re-run Step 6 and Step 8.
+
+### "Webapp not found" in Day 2 pipeline
+The Day 0 pipeline hasn't been run yet (or failed). Day 2 depends on the Web App existing. Run Day 0 first.
+
+### Pipeline is stuck on "Waiting for review"
+Click on the workflow run, click **Review deployments**, check **Production**, and click **Approve and deploy**.
+
+### "Storage account name already taken"
+Storage account names are globally unique. Change the name to something unique (add random numbers) and update `main.tf` to match.

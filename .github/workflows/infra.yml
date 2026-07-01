@@ -1,0 +1,63 @@
+name: 'Day 0 - Infrastructure'
+
+# ---------------------------------------------------------------
+# This pipeline provisions all Azure infrastructure using Terraform.
+# It runs automatically when .tf files change, or can be triggered manually.
+# ---------------------------------------------------------------
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '*.tf'
+      - '.github/workflows/infra.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - '*.tf'
+      - '.github/workflows/infra.yml'
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions UI
+
+env:
+  ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+
+jobs:
+  # ---------------------------------------------------------------
+  # JOB 1: Plan — runs on Pull Requests to preview changes
+  # ---------------------------------------------------------------
+  terraform-plan:
+    name: 'Terraform Plan'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      run: terraform init
+
+    - name: Terraform Plan
+      run: terraform plan -no-color
+
+  # ---------------------------------------------------------------
+  # JOB 2: Apply — runs on merge to main (requires approval)
+  # ---------------------------------------------------------------
+  terraform-apply:
+    name: 'Terraform Apply'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment: Production
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      run: terraform init
+
+    - name: Terraform Apply
+      run: terraform apply -auto-approve

@@ -1,0 +1,79 @@
+name: 'Day 2 - Application'
+
+# ---------------------------------------------------------------
+# This pipeline deploys the Flask application code to the Azure
+# Web App that was already provisioned by the Day 0 infra pipeline.
+# It runs automatically when application source files change,
+# or can be triggered manually.
+# ---------------------------------------------------------------
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - '.github/workflows/app.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - '.github/workflows/app.yml'
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions UI
+
+jobs:
+  # ---------------------------------------------------------------
+  # JOB 1: Validate — runs on Pull Requests to check the app
+  # ---------------------------------------------------------------
+  validate:
+    name: 'Validate Application'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: pip install -r src/requirements.txt
+
+    - name: Syntax check
+      run: python -m py_compile src/app.py
+
+  # ---------------------------------------------------------------
+  # JOB 2: Deploy — runs on merge to main (requires approval)
+  # ---------------------------------------------------------------
+  deploy:
+    name: 'Deploy to Azure Web App'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment: Production
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+
+    - name: Package Application
+      run: |
+        cd src
+        zip -r ../app.zip .
+
+    - name: Deploy to Web App
+      run: |
+        # Find the Web App name dynamically (Terraform used a random ID suffix)
+        APP_NAME=$(az webapp list --resource-group rg-cloud-access-demo --query "[0].name" -o tsv)
+        echo "Deploying to Web App: $APP_NAME"
+
+        # Restart first to ensure the app is warm
+        az webapp restart --resource-group rg-cloud-access-demo --name $APP_NAME
+        sleep 30
+
+        # Deploy the zipped application
+        az webapp deploy --resource-group rg-cloud-access-demo --name $APP_NAME --src-path app.zip --type zip --timeout 600

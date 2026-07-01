@@ -75,7 +75,7 @@ resource "azurerm_mssql_server" "sql" {
   version                      = "12.0"
   administrator_login          = "sqladmin"
   
-  # The "Trap" - this is the static password Safeguard will rotate later!
+  # ***** - this is the static password Safeguard will rotate later!
   administrator_login_password = azurerm_key_vault_secret.example.value 
 }
 
