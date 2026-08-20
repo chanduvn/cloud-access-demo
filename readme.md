@@ -18,12 +18,12 @@ This guide assumes **you are starting completely from scratch** — no GitHub ac
 3. [Create a GitHub Account](#3-create-a-github-account)
 4. [Set Up Your Azure Account](#4-set-up-your-azure-account)
 5. [Log In to Azure from Your Terminal](#5-log-in-to-azure-from-your-terminal)
-6. [Create a Service Principal (Pipeline Identity)](#6-create-a-service-principal-pipeline-identity)
+6. [Create an App Registration for OIDC (Pipeline Identity)](#6-create-an-app-registration-for-oidc-pipeline-identity)
 7. [Set Up Terraform Remote State Storage](#7-set-up-terraform-remote-state-storage)
-8. [Grant the Service Principal Access to the State Storage](#8-grant-the-service-principal-access-to-the-state-storage)
+8. [Grant the App Registration Access to the State Storage](#8-grant-the-app-registration-access-to-the-state-storage)
 9. [Create Your GitHub Repository](#9-create-your-github-repository)
-10. [Add Azure Secrets to GitHub](#10-add-azure-secrets-to-github)
-11. [Create the Production Environment Gate](#11-create-the-production-environment-gate)
+10. [Create the Production Environment Gate](#10-create-the-production-environment-gate)
+11. [Add Azure Secrets to GitHub](#11-add-azure-secrets-to-github)
 12. [Push Your Code to GitHub](#12-push-your-code-to-github)
 13. [Run the Day 0 Infrastructure Pipeline](#13-run-the-day-0-infrastructure-pipeline)
 14. [Run the Day 2 Application Pipeline](#14-run-the-day-2-application-pipeline)
@@ -136,43 +136,95 @@ az account show --query "{Name:name, SubscriptionId:id}" -o table
 
 ---
 
-## 6. Create a Service Principal (Pipeline Identity)
+## 6. Create an App Registration for OIDC (Pipeline Identity)
 
-GitHub Actions can't log in as *you*. It needs its own identity — called a **Service Principal** — to authenticate to Azure.
+GitHub Actions can't log in as *you*. It needs its own identity to authenticate to Azure. This
+project uses **OIDC federation** rather than a client secret — GitHub issues a short-lived,
+workflow-scoped token at run time, and Azure trusts it directly. There is no password to
+generate, store, rotate, or leak.
+
+> **Why not a client secret?** A secret is a standing credential sitting in GitHub for as long
+> as nobody remembers to rotate it. OIDC has nothing to steal between runs — the trust is
+> "GitHub vouches for this exact repo + environment," not "whoever holds this string."
 
 ### 6a. Create the target Resource Group first
-
-The Service Principal needs something to be scoped to. Create the resource group that Terraform will manage:
 
 ```bash
 az group create --name "rg-cloud-access-demo" --location "uksouth"
 ```
 
-### 6b. Create the Service Principal
+### 6b. Create the App Registration
 
 ```bash
-az ad sp create-for-rbac --name "Demo-Pipeline-SP" --role Contributor --scopes /subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-cloud-access-demo
+az ad app create --display-name "cloud-access-demo-oidc" --query appId -o tsv
 ```
 
-This outputs a JSON block like:
+Save the App ID this prints — you'll need it repeatedly below. A service principal for the app
+is created automatically; confirm it exists:
 
-```json
-{
-  "appId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "displayName": "Demo-Pipeline-SP",
-  "password": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "tenant": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-}
+```bash
+az ad sp show --id "<YOUR_APP_ID>" --query "{appId:appId, objectId:id}" -o json
 ```
 
-> **CRITICAL**: Copy this output and save it somewhere safe (e.g., a temporary text file). The `password` is shown only once and cannot be retrieved later. You'll need all four values in Step 10.
+> **Permission note:** creating an App Registration needs no special Entra role by default —
+> most tenants allow any signed-in user to do this (`az rest --method GET --url
+> "https://graph.microsoft.com/v1.0/policies/authorizationPolicy" --query
+> "defaultUserRolePermissions.allowedToCreateApps"` tells you your tenant's setting). If it's
+> `false` and the command above fails, ask your Entra admin to create the App Registration for
+> you, or use a **User-Assigned Managed Identity** instead — those support federated
+> credentials too and only need Contributor rights on a resource group, not an Entra role.
 
-| JSON field | What it is | GitHub Secret name |
-|---|---|---|
-| `appId` | The Service Principal's client ID | `AZURE_CLIENT_ID` |
-| `password` | The Service Principal's password | `AZURE_CLIENT_SECRET` |
-| `tenant` | Your Azure AD tenant ID | `AZURE_TENANT_ID` |
-| *(from Step 5)* | Your Subscription ID | `AZURE_SUBSCRIPTION_ID` |
+### 6c. Grant it access to the target resource group
+
+Using the **object ID** from step 6b (not the App ID):
+
+```bash
+az role assignment create --assignee-object-id "<SP_OBJECT_ID>" \
+  --assignee-principal-type ServicePrincipal --role "Contributor" \
+  --scope "/subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-cloud-access-demo"
+```
+
+*(You'll repeat this once more for the state-storage resource group in Step 8.)*
+
+### 6d. Create the federated credential — the actual OIDC trust
+
+This tells Azure AD "accept GitHub-issued tokens for workflow runs deploying to this repo's
+`Production` environment." Via CLI:
+
+```bash
+az ad app federated-credential create --id "<YOUR_APP_ID>" --parameters '{
+  "name": "github-cloud-access-demo-production",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:<YOUR_GITHUB_USERNAME>/cloud-access-demo:environment:Production",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+```
+
+Or via the **Azure Portal**, if you'd rather click through it:
+
+1. **Microsoft Entra ID → App registrations** → open your `cloud-access-demo-oidc` app
+2. **Certificates & secrets → Federated credentials** tab → **+ Add credential**
+3. Scenario: **GitHub Actions deploying Azure resources**
+4. **Organization**: your GitHub username · **Repository**: `cloud-access-demo`
+5. Fill in **Organization ID** and **Repository ID** — Azure now pins the trust to the
+   numeric GitHub IDs, not just the names, so a deleted-and-recreated repo/org can't inherit
+   the trust. Get them from GitHub's public API:
+   ```bash
+   curl -s "https://api.github.com/users/<YOUR_GITHUB_USERNAME>" | grep '"id"'
+   curl -s "https://api.github.com/repos/<YOUR_GITHUB_USERNAME>/cloud-access-demo" | grep '"id"'
+   ```
+6. **Entity type**: `Environment` · **GitHub environment name**: `Production` (must match
+   exactly, case-sensitive — this is the same `environment: Production` used in both
+   workflow files)
+7. Name it, leave **Audience** as the default, click **Add**
+
+> **Note:** this scopes trust to the `Production` environment specifically. The
+> `terraform-plan` job (runs on pull requests) doesn't declare an `environment:`, so its OIDC
+> token won't match this credential and it can't authenticate. That's intentional for now —
+> add a second federated credential with subject `repo:<org>/cloud-access-demo:pull_request`
+> if you want PR-triggered plans to also authenticate.
+
+You'll need the App ID, your Tenant ID, and your Subscription ID in Step 11.
 
 ---
 
@@ -204,20 +256,14 @@ az storage container create --name "tfstate" --account-name "tfstatedemostorage0
 
 ---
 
-## 8. Grant the Service Principal Access to the State Storage
+## 8. Grant the App Registration Access to the State Storage
 
-The Service Principal needs Contributor access to the state storage resource group too, otherwise the pipeline can't read or write the Terraform state.
-
-First, find the Service Principal's **Object ID** (this is different from `appId`):
+The pipeline identity needs Contributor access to the state storage resource group too, otherwise it can't read or write the Terraform state. Same command as Step 6c, different scope:
 
 ```bash
-az ad sp list --display-name "Demo-Pipeline-SP" --query "[0].id" -o tsv
-```
-
-Then grant it access:
-
-```bash
-az role assignment create --assignee "<SP_OBJECT_ID>" --role "Contributor" --scope "/subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-terraform-state-demo"
+az role assignment create --assignee-object-id "<SP_OBJECT_ID>" \
+  --assignee-principal-type ServicePrincipal --role "Contributor" \
+  --scope "/subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/rg-terraform-state-demo"
 ```
 
 ---
@@ -256,40 +302,48 @@ git push -u origin main
 
 If prompted, sign in with your GitHub credentials.
 
----
-
-## 10. Add Azure Secrets to GitHub
-
-The pipelines need your Azure credentials to run. These are stored as encrypted **Secrets** in GitHub — they are never visible in logs.
-
-1. In your GitHub repository, click **Settings** (the gear icon tab, far right)
-2. In the left sidebar, click **Secrets and variables** → **Actions**
-3. Click **New repository secret** and add each of the following (one at a time):
-
-| Secret name | Value (from Step 6) |
-|---|---|
-| `AZURE_CLIENT_ID` | The `appId` from the Service Principal output |
-| `AZURE_CLIENT_SECRET` | The `password` from the Service Principal output |
-| `AZURE_TENANT_ID` | The `tenant` from the Service Principal output |
-| `AZURE_SUBSCRIPTION_ID` | Your Azure Subscription ID (from Step 5) |
-
-When you're done, you should see all four secrets listed on the Actions secrets page.
+> **Note:** If you cloned or forked this repo instead of downloading it fresh, skip the `git init` and `git remote add` steps — your `origin` is already set. Just run `git add .`, `git commit`, and `git push`.
 
 ---
 
-## 11. Create the Production Environment Gate
+## 10. Create the Production Environment Gate
 
-Both pipelines require manual approval before deploying. This is enforced through a GitHub **Environment**.
+Both pipelines require manual approval before deploying. This is enforced through a GitHub
+**Environment** — and since Step 11's secrets are scoped to this environment (not the whole
+repo), it has to exist first.
 
 1. In your repository, go to **Settings** → **Environments**
 2. Click **New environment**
-3. Name it exactly: `Production` (capital P — must match the workflow files)
+3. Name it exactly: `Production` (capital P — must match the workflow files, and must match
+   the `GitHub environment name` you set on the federated credential in Step 6d)
 4. Click **Configure environment**
 5. Under **Environment protection rules**, check **Required reviewers**
 6. In the search box, type your own GitHub username and select it
 7. Click **Save protection rules**
 
 Now whenever either pipeline wants to deploy, it will pause and wait for you to click "Approve".
+
+---
+
+## 11. Add Azure Secrets to GitHub
+
+The pipelines need three values to authenticate via OIDC — no client secret. These are stored
+as **Environment secrets** on the `Production` environment you just created, not repository
+secrets: the federated credential's trust is scoped to that environment specifically, so
+scoping the secrets the same way means no other workflow or job in the repo can read them,
+even in principle.
+
+1. In your repository, go to **Settings** → **Environments** → **Production**
+2. Under **Environment secrets**, click **Add secret** and add each of the following (one at
+   a time):
+
+| Secret name | Value |
+|---|---|
+| `AZURE_CLIENT_ID` | The App ID from Step 6b |
+| `AZURE_TENANT_ID` | Your Azure AD tenant ID (`az account show --query tenantId -o tsv`) |
+| `AZURE_SUBSCRIPTION_ID` | Your Azure Subscription ID (from Step 5) |
+
+When you're done, you should see all three secrets listed under the Production environment.
 
 ---
 
@@ -440,9 +494,10 @@ Push *.tf to main  ──→  Terraform Plan  ──→  Approval Gate  ──�
 ```
 
 - **Triggers on**: changes to `*.tf` files, or manual dispatch
-- **Pull Requests**: runs `terraform plan` to preview changes (no approval needed)
+- **Pull Requests**: runs `terraform plan` to preview changes (no approval needed — though see
+  the OIDC scope note in Step 6d, this job currently can't authenticate)
 - **Push to main**: runs `terraform apply` after manual approval
-- **Authentication**: uses `ARM_*` environment variables set from GitHub Secrets
+- **Authentication**: OIDC federation (`ARM_USE_OIDC: true`) — no client secret
 
 ### Day 2 — Application (`app.yml`)
 
@@ -453,7 +508,7 @@ Push src/* to main  ──→  Validate App  ──→  Approval Gate  ──→
 - **Triggers on**: changes to `src/**` files, or manual dispatch
 - **Pull Requests**: installs dependencies and runs a syntax check
 - **Push to main**: zips and deploys the app to Azure after manual approval
-- **Authentication**: uses `az login` with the same Service Principal credentials
+- **Authentication**: `azure/login@v2` via OIDC federation — no client secret
 
 ---
 

@@ -20,18 +20,26 @@ on:
 
 env:
   ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+  ARM_USE_OIDC:        true
 
 jobs:
   # ---------------------------------------------------------------
   # JOB 1: Plan — runs on Pull Requests to preview changes
+  # NOTE: the federated credential trusts subject "environment:Production" only
+  # (matching the apply job below). This job has no `environment:`, so its OIDC
+  # token won't match that trust and login will fail until a second federated
+  # credential is added for the pull_request subject, or this job is also scoped
+  # to an environment.
   # ---------------------------------------------------------------
   terraform-plan:
     name: 'Terraform Plan'
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
     - uses: actions/checkout@v4
@@ -51,6 +59,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     environment: Production
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
     - uses: actions/checkout@v4
