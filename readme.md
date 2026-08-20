@@ -447,7 +447,7 @@ The `main.tf` file has a hardcoded operator Object ID for Key Vault access (need
 az ad signed-in-user show --query "id" -o tsv
 ```
 
-In `main.tf`, find the second `access_policy` block inside `azurerm_key_vault` and replace the Object ID with yours.
+In `main.tf`, find the `azurerm_key_vault_access_policy.demo_operator` resource and replace the Object ID with yours.
 
 ### Destroy the infrastructure
 

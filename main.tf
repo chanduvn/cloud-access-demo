@@ -42,21 +42,29 @@ resource "azurerm_key_vault" "vault" {
   tenant_id           = data.azurerm_client_config.current.tenant_id
   sku_name            = "standard"
 
-  # Access for whoever runs Terraform (Service Principal in CI)
-  access_policy {
-    tenant_id = data.azurerm_client_config.current.tenant_id
-    object_id = data.azurerm_client_config.current.object_id
-    secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
-  }
+  # Access policies are managed entirely via standalone azurerm_key_vault_access_policy
+  # resources below (see terraform_operator, demo_operator, webapp_policy) — do not add
+  # inline access_policy blocks here. Mixing both mechanisms on the same vault makes
+  # Terraform lose track of which policy is which and can silently overwrite one
+  # identity's permissions with another's on the next apply.
+}
 
-  # Access for the demo operator (so terraform destroy works locally)
-  # IMPORTANT: Replace this Object ID with your own Azure AD User Object ID.
-  # Find yours by running: az ad signed-in-user show --query "id" -o tsv
-  access_policy {
-    tenant_id          = data.azurerm_client_config.current.tenant_id
-    object_id          = "39d8aa62-87be-4e64-9179-f0411bc70650"
-    secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
-  }
+# Access for whoever runs Terraform (Service Principal in CI)
+resource "azurerm_key_vault_access_policy" "terraform_operator" {
+  key_vault_id       = azurerm_key_vault.vault.id
+  tenant_id          = data.azurerm_client_config.current.tenant_id
+  object_id          = data.azurerm_client_config.current.object_id
+  secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
+}
+
+# Access for the demo operator (so terraform destroy works locally)
+# IMPORTANT: Replace this Object ID with your own Azure AD User Object ID.
+# Find yours by running: az ad signed-in-user show --query "id" -o tsv
+resource "azurerm_key_vault_access_policy" "demo_operator" {
+  key_vault_id       = azurerm_key_vault.vault.id
+  tenant_id          = data.azurerm_client_config.current.tenant_id
+  object_id          = "39d8aa62-87be-4e64-9179-f0411bc70650"
+  secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
 }
 
 resource "azurerm_key_vault_secret" "example" {
