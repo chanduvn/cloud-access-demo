@@ -93,6 +93,14 @@ resource "azurerm_mssql_firewall_rule" "allow_azure" {
   end_ip_address   = "0.0.0.0"
 }
 
+# Allow the Safeguard appliance (Skytap egress IP) to reach the SQL Server for rotation
+resource "azurerm_mssql_firewall_rule" "allow_safeguard" {
+  name             = "AllowSafeguardAppliance"
+  server_id        = azurerm_mssql_server.sql.id
+  start_ip_address = "185.64.245.51"
+  end_ip_address   = "185.64.245.51"
+}
+
 # ---------------------------------------------------------
 # NEW: APP SERVICE (WEB APP)
 # ---------------------------------------------------------
