@@ -71,6 +71,11 @@ resource "azurerm_key_vault_secret" "example" {
   name         = "database-password"
   value        = "InitialStaticPassword123!"
   key_vault_id = azurerm_key_vault.vault.id
+
+  # Only referencing azurerm_key_vault.vault.id doesn't force Terraform to wait for the
+  # access policy that grants it write permission — the two aren't otherwise linked, so
+  # they can run in parallel and this can lose the race against policy propagation.
+  depends_on = [azurerm_key_vault_access_policy.terraform_operator]
 }
 
 # ---------------------------------------------------------
