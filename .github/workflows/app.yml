@@ -72,13 +72,21 @@ jobs:
 
     - name: Deploy to Web App
       run: |
-        # Find the Web App name dynamically (Terraform used a random ID suffix)
-        APP_NAME=$(az webapp list --resource-group rg-cloud-access-demo --query "[0].name" -o tsv)
+        # Find the Web App name dynamically (Terraform used a random ID suffix).
+        # Match the demo app's prefix rather than taking [0] blindly, so this can't
+        # silently deploy to some other app that happens to sort first.
+        APP_NAME=$(az webapp list --resource-group rg-cloud-access-demo \
+          --query "[?starts_with(name,'app-demo-')].name | [0]" -o tsv)
+        if [ -z "$APP_NAME" ]; then
+          echo "::error::No app-demo-* web app found in rg-cloud-access-demo. Run Day 0 first."
+          exit 1
+        fi
         echo "Deploying to Web App: $APP_NAME"
 
-        # Restart first to ensure the app is warm
-        az webapp restart --resource-group rg-cloud-access-demo --name $APP_NAME
-        sleep 30
-
-        # Deploy the zipped application
-        az webapp deploy --resource-group rg-cloud-access-demo --name $APP_NAME --src-path app.zip --type zip --timeout 600
+        # Deliberately NOT restarting first. Restarting doesn't warm the app -- it
+        # cycles the container, and on a B1 plan Kudu shares that instance. Doing so
+        # immediately before a zip deploy that runs an Oryx build (compiling pyodbc)
+        # starved Kudu and returned HTTP 502 mid-build, leaving wwwroot empty.
+        # Zip deploy restarts the app itself once it completes.
+        az webapp deploy --resource-group rg-cloud-access-demo --name "$APP_NAME" \
+          --src-path app.zip --type zip --timeout 900
