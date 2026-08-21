@@ -81,6 +81,17 @@ jobs:
     - name: Install pyodbc
       run: pip install pyodbc
 
+    # Fail fast and legibly. Without this, a missing ODBC driver or a broken az
+    # session only surfaces from inside `terraform apply`, after half the
+    # infrastructure is already provisioned, as an opaque provisioner error.
+    - name: Preflight — verify grant-sql-access.py prerequisites
+      run: |
+        python -c "import pyodbc; \
+          ds = [d for d in pyodbc.drivers() if 'SQL Server' in d]; \
+          print('SQL Server ODBC drivers:', ds); \
+          exit('FATAL: no SQL Server ODBC driver on this runner' if not ds else 0)"
+        az account show --query "{subscription:name, identity:user.name}" -o json
+
     - name: Terraform Init
       run: terraform init
 

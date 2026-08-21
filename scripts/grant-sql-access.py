@@ -53,6 +53,27 @@ def az_cli() -> str:
     return az
 
 
+def pick_odbc_driver() -> str:
+    """Pick the newest installed SQL Server ODBC driver.
+
+    Don't hardcode a version: a dev laptop and a GitHub-hosted runner don't
+    necessarily ship the same one, and a missing-driver failure surfaces as an
+    opaque pyodbc error rather than something actionable.
+    """
+    candidates = [d for d in pyodbc.drivers() if "SQL Server" in d]
+    if not candidates:
+        raise RuntimeError(
+            f"No SQL Server ODBC driver installed. Available drivers: {pyodbc.drivers()}"
+        )
+    # "ODBC Driver 18 for SQL Server" sorts above 17 above the legacy "SQL Server".
+    versioned = sorted(
+        (d for d in candidates if "ODBC Driver" in d),
+        key=lambda d: int("".join(c for c in d if c.isdigit()) or 0),
+        reverse=True,
+    )
+    return versioned[0] if versioned else candidates[0]
+
+
 def get_access_token(az: str) -> bytes:
     result = subprocess.run(
         [az, "account", "get-access-token", "--resource", "https://database.windows.net",
@@ -114,8 +135,10 @@ def main() -> int:
     add_temp_firewall_rule(az, resource_group, server_name, my_ip, rule_name)
 
     try:
+        driver = pick_odbc_driver()
+        print(f"Using ODBC driver: {driver}")
         conn_str = (
-            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+            f"DRIVER={{{driver}}};"
             f"SERVER={server_fqdn};DATABASE={database};Encrypt=yes;"
         )
         token_struct = get_access_token(az)
