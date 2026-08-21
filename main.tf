@@ -49,27 +49,30 @@ resource "azurerm_key_vault" "vault" {
   # identity's permissions with another's on the next apply.
 }
 
-# Access for whoever runs Terraform (Service Principal in CI)
+locals {
+  # Fixed, stable identities — deliberately NOT data.azurerm_client_config.current.
+  # Binding either policy to "whoever is currently running Terraform" made both
+  # unstable across a human/CI identity switch: Key Vault access policies are keyed
+  # by object_id, so every switch replaced the policy, and every replace risked a
+  # collision with whatever policy already existed for the incoming object_id (hit
+  # this for real, more than once, in both directions). Hardcoding both to their
+  # real, permanent owners means neither ever needs to change just because a
+  # different identity happened to run `terraform apply` this time.
+  ci_pipeline_object_id   = "56081582-da15-4a25-91de-a5d275103958" # cloud-access-demo-oidc SP
+  demo_operator_object_id = "39d8aa62-87be-4e64-9179-f0411bc70650" # human demo operator
+}
+
+# Access for the CI pipeline's identity specifically (not "whoever runs Terraform")
 resource "azurerm_key_vault_access_policy" "terraform_operator" {
   key_vault_id       = azurerm_key_vault.vault.id
   tenant_id          = data.azurerm_client_config.current.tenant_id
-  object_id          = data.azurerm_client_config.current.object_id
+  object_id          = local.ci_pipeline_object_id
   secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
 }
 
-locals {
-  demo_operator_object_id = "39d8aa62-87be-4e64-9179-f0411bc70650"
-}
-
 # Access for the demo operator (so terraform destroy/browsing works locally even
-# when the vault was provisioned via CI). Skipped when whoever is currently running
-# Terraform already IS that identity (e.g. testing locally as the demo operator) —
-# Key Vault access policies are keyed by object_id, so two resources both targeting
-# the same one collide: this happened for real, both on create ("already exists")
-# and on destroy (one policy deleted from under the other before a dependent
-# resource's own operation completed).
+# when the vault was provisioned via CI)
 resource "azurerm_key_vault_access_policy" "demo_operator" {
-  count              = data.azurerm_client_config.current.object_id == local.demo_operator_object_id ? 0 : 1
   key_vault_id       = azurerm_key_vault.vault.id
   tenant_id          = data.azurerm_client_config.current.tenant_id
   object_id          = local.demo_operator_object_id
@@ -84,10 +87,8 @@ resource "azurerm_key_vault_secret" "example" {
   # Only referencing azurerm_key_vault.vault.id doesn't force Terraform to wait for the
   # access policy that grants it write permission — the two aren't otherwise linked, so
   # they can run in parallel and this can lose the race against policy propagation.
-  # Depends on both policies: whichever identity actually runs Terraform (the CI service
-  # principal in production, or a human's own identity when run locally — which happens
-  # to collide with demo_operator's hardcoded object ID), its granting policy must still
-  # exist when this resource is created or destroyed.
+  # Depends on both policies since either identity might be the one actually running
+  # Terraform for a given apply/destroy.
   depends_on = [
     azurerm_key_vault_access_policy.terraform_operator,
     azurerm_key_vault_access_policy.demo_operator,
@@ -108,13 +109,14 @@ resource "azurerm_mssql_server" "sql" {
   administrator_login_password = azurerm_key_vault_secret.example.value
 
   # Azure AD administrator — required before any AAD-based CREATE USER FROM
-  # EXTERNAL PROVIDER statement can run against a database on this server. Set to
-  # whoever runs Terraform (same identity as terraform_operator's Key Vault
-  # policy), so the same apply that provisions the app can also grant the app's
-  # managed identity database access (see grant_app_sql_access below).
+  # EXTERNAL PROVIDER statement can run against a database on this server. Fixed
+  # to the CI pipeline's identity (see locals.ci_pipeline_object_id above), same
+  # reasoning as terraform_operator's Key Vault policy: this needs to be whoever
+  # actually runs the grant_app_sql_access step in real operation (CI), not
+  # whoever happens to be running `terraform apply` at any given moment.
   azuread_administrator {
     login_username = "terraform-pipeline-admin"
-    object_id      = data.azurerm_client_config.current.object_id
+    object_id      = local.ci_pipeline_object_id
   }
 }
 
