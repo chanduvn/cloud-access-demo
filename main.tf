@@ -225,6 +225,9 @@ resource "azurerm_key_vault_access_policy" "webapp_policy" {
 resource "null_resource" "grant_app_sql_access" {
   triggers = {
     client_id = azurerm_user_assigned_identity.app.client_id
+    # Re-run whenever the script itself changes, not just when the identity does --
+    # otherwise edits to the script silently never execute against an existing stack.
+    script_hash = filemd5("${path.module}/scripts/grant-sql-access.py")
   }
 
   provisioner "local-exec" {

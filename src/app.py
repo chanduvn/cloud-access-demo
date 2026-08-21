@@ -51,17 +51,11 @@ def index():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # Auto-create table if it doesn't exist
-        cursor.execute("""
-            IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Messages' AND xtype='U')
-            CREATE TABLE Messages (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                message NVARCHAR(255),
-                created_at DATETIME DEFAULT GETDATE()
-            )
-        """)
-        conn.commit()
+
+        # The Messages table is created at provisioning time, not here. The app's
+        # identity holds only db_datareader/db_datawriter -- deliberately, since the
+        # whole point is least privilege -- so it cannot issue DDL, and an app that
+        # rewrites its own schema on every request isn't a pattern worth showing.
 
         # Handle form submission
         if request.method == 'POST':

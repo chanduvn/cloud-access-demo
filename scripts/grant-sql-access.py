@@ -186,6 +186,23 @@ def main() -> int:
                 principal,
             )
 
+        # Create the app's table here rather than in the app itself. The app holds
+        # only db_datareader/db_datawriter and so cannot issue DDL -- which is the
+        # point of granting least privilege. This connection is the AAD admin, so
+        # provisioning time is the right place for schema.
+        #
+        # Placeholder: PLAN.md 1.3 replaces this with a real pipeline migration step
+        # that retrieves sqladmin through Safeguard A2A (demo Act 2).
+        cursor.execute(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Messages') "
+            "CREATE TABLE Messages ("
+            "  id INT IDENTITY(1,1) PRIMARY KEY,"
+            "  message NVARCHAR(255),"
+            "  created_at DATETIME DEFAULT GETDATE()"
+            ")"
+        )
+        print("Ensured table Messages exists.")
+
         conn.close()
         print(f"Granted {principal} db_datareader + db_datawriter on {database}.")
         return 0
