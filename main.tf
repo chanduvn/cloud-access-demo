@@ -214,6 +214,7 @@ resource "null_resource" "grant_app_sql_access" {
       RESOURCE_GROUP_NAME = azurerm_resource_group.demo.name
       SQL_DATABASE        = azurerm_mssql_database.db.name
       APP_PRINCIPAL_NAME  = azurerm_linux_web_app.app.name
+      APP_PRINCIPAL_ID    = azurerm_linux_web_app.app.identity[0].principal_id
     }
   }
 

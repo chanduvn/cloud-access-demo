@@ -78,8 +78,16 @@ jobs:
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Install pyodbc
-      run: pip install pyodbc
+    # GitHub-hosted Ubuntu runners ship unixODBC but no SQL Server driver, so
+    # pyodbc has nothing to connect through. Microsoft's package repo provides it.
+    - name: Install SQL Server ODBC driver and pyodbc
+      run: |
+        curl -sSL -O "https://packages.microsoft.com/config/ubuntu/$(grep VERSION_ID /etc/os-release | cut -d '"' -f 2)/packages-microsoft-prod.deb"
+        sudo dpkg -i packages-microsoft-prod.deb
+        rm packages-microsoft-prod.deb
+        sudo apt-get update -qq
+        sudo ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18
+        pip install pyodbc
 
     # Fail fast and legibly. Without this, a missing ODBC driver or a broken az
     # session only surfaces from inside `terraform apply`, after half the

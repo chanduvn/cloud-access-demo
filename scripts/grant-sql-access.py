@@ -24,10 +24,11 @@ Required environment variables:
   SQL_SERVER_NAME     e.g. sql-demo-abcd1234 (the resource name, not the FQDN)
   RESOURCE_GROUP_NAME e.g. rg-cloud-access-demo
   SQL_DATABASE        e.g. demodb
-  APP_PRINCIPAL_NAME  the AAD display name to grant access to, e.g. the Web
-                      App's resource name (app-demo-abcd1234) -- this is also
-                      the login name CREATE USER ... FROM EXTERNAL PROVIDER
-                      will use
+  APP_PRINCIPAL_NAME  the database user name to create, e.g. the Web App's
+                      resource name (app-demo-abcd1234)
+  APP_PRINCIPAL_ID    that principal's AAD object ID (GUID) -- used to build the
+                      SID directly, avoiding a Microsoft Graph lookup (see the
+                      comment on CREATE USER below for why that matters)
 """
 
 import os
@@ -126,6 +127,7 @@ def main() -> int:
     resource_group = os.environ["RESOURCE_GROUP_NAME"]
     database = os.environ["SQL_DATABASE"]
     principal = os.environ["APP_PRINCIPAL_NAME"]
+    principal_id = os.environ["APP_PRINCIPAL_ID"]
 
     az = az_cli()
     my_ip = get_own_public_ip()
@@ -151,9 +153,18 @@ def main() -> int:
         # can't be parameterized.
         safe_principal = principal.replace("]", "]]")
 
+        # Deliberately NOT "CREATE USER ... FROM EXTERNAL PROVIDER". That form makes
+        # Azure SQL resolve the name against Microsoft Graph, and when the executing
+        # identity is a service principal (our CI pipeline) rather than a human, the
+        # SQL server's own identity needs the Directory Readers role to do that --
+        # which requires a Global Admin to grant. Creating the user directly from its
+        # AAD object ID as a SID needs no directory lookup at all, so it works
+        # regardless of tenant permissions. TYPE = E marks it an external AAD principal.
+        # bytes_le matches the mixed-endian byte order SQL Server expects for a GUID.
+        sid = "0x" + uuid.UUID(principal_id).bytes_le.hex().upper()
         cursor.execute(
             f"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ?) "
-            f"CREATE USER [{safe_principal}] FROM EXTERNAL PROVIDER",
+            f"CREATE USER [{safe_principal}] WITH SID = {sid}, TYPE = E",
             principal,
         )
         for role in ("db_datareader", "db_datawriter"):
