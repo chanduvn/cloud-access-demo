@@ -75,7 +75,14 @@ resource "azurerm_key_vault_secret" "example" {
   # Only referencing azurerm_key_vault.vault.id doesn't force Terraform to wait for the
   # access policy that grants it write permission — the two aren't otherwise linked, so
   # they can run in parallel and this can lose the race against policy propagation.
-  depends_on = [azurerm_key_vault_access_policy.terraform_operator]
+  # Depends on both policies: whichever identity actually runs Terraform (the CI service
+  # principal in production, or a human's own identity when run locally — which happens
+  # to collide with demo_operator's hardcoded object ID), its granting policy must still
+  # exist when this resource is created or destroyed.
+  depends_on = [
+    azurerm_key_vault_access_policy.terraform_operator,
+    azurerm_key_vault_access_policy.demo_operator,
+  ]
 }
 
 # ---------------------------------------------------------
