@@ -6,14 +6,19 @@ app = Flask(__name__)
 
 DB_SERVER = os.environ.get('DB_SERVER')
 DB_DATABASE = os.environ.get('DB_DATABASE')
+AZURE_CLIENT_ID = os.environ.get('AZURE_CLIENT_ID')
 
 def get_db_connection():
-    # Passwordless: authenticates as the Web App's own system-assigned managed
-    # identity via Azure AD, granted db_datareader/db_datawriter out-of-band by
+    # Passwordless: authenticates as the Web App's user-assigned managed identity
+    # via Azure AD, granted db_datareader/db_datawriter out-of-band by
     # scripts/grant-sql-access.py. No password anywhere in this app.
+    #
+    # UID must carry the identity's client ID: a user-assigned identity is not
+    # implicit the way a system-assigned one is, so the driver has to be told which
+    # identity to present.
     conn_str = (
         f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={DB_SERVER};DATABASE={DB_DATABASE};"
-        f"Authentication=ActiveDirectoryMsi;Encrypt=yes;"
+        f"Authentication=ActiveDirectoryMsi;UID={AZURE_CLIENT_ID};Encrypt=yes;"
     )
     return pyodbc.connect(conn_str)
 

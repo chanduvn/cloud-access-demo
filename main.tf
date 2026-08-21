@@ -154,6 +154,21 @@ resource "azurerm_service_plan" "plan" {
   sku_name            = "B1" # Basic tier
 }
 
+# User-assigned rather than system-assigned, for one specific reason: Azure SQL
+# identifies a service principal by its *application (client) ID*, so the database
+# user's SID has to be built from that — not the object/principal ID. A
+# system-assigned identity only exposes its principal_id through ARM; resolving that
+# to a client ID needs a Microsoft Graph lookup, which requires directory read
+# permissions the CI service principal doesn't have (the same Directory Readers wall
+# that made us avoid CREATE USER ... FROM EXTERNAL PROVIDER). A user-assigned
+# identity exposes client_id directly as a Terraform attribute, so the whole problem
+# disappears. It also decouples identity lifecycle from the app's.
+resource "azurerm_user_assigned_identity" "app" {
+  name                = "id-app-demo-${random_id.vault_id.hex}"
+  location            = azurerm_resource_group.demo.location
+  resource_group_name = azurerm_resource_group.demo.name
+}
+
 resource "azurerm_linux_web_app" "app" {
   name                = "app-demo-${random_id.vault_id.hex}"
   location            = azurerm_resource_group.demo.location
@@ -166,17 +181,24 @@ resource "azurerm_linux_web_app" "app" {
     }
   }
 
-  # Give the Web App an Azure Active Directory Identity
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.app.id]
   }
 
-  # No DB_PASSWORD: the app authenticates to SQL passwordlessly via its own managed
+  # Key Vault references (if any are added later) must be resolved using the same
+  # user-assigned identity; without this App Service looks for a system-assigned one.
+  key_vault_reference_identity_id = azurerm_user_assigned_identity.app.id
+
+  # No DB_PASSWORD: the app authenticates to SQL passwordlessly via its managed
   # identity (see grant_app_sql_access below) instead of a Key Vault-sourced secret.
+  # AZURE_CLIENT_ID tells the ODBC driver *which* user-assigned identity to present —
+  # unlike a system-assigned identity, that is not implicit.
   app_settings = {
     "SCM_DO_BUILD_DURING_DEPLOYMENT" = "true" # Tells Azure to install python requirements
     "DB_SERVER"                      = azurerm_mssql_server.sql.fully_qualified_domain_name
     "DB_DATABASE"                    = azurerm_mssql_database.db.name
+    "AZURE_CLIENT_ID"                = azurerm_user_assigned_identity.app.client_id
   }
 }
 
@@ -188,8 +210,8 @@ resource "azurerm_linux_web_app" "app" {
 # Safeguard rotation, and this policy is cheap to leave in place for now.
 resource "azurerm_key_vault_access_policy" "webapp_policy" {
   key_vault_id = azurerm_key_vault.vault.id
-  tenant_id    = azurerm_linux_web_app.app.identity[0].tenant_id
-  object_id    = azurerm_linux_web_app.app.identity[0].principal_id
+  tenant_id    = azurerm_user_assigned_identity.app.tenant_id
+  object_id    = azurerm_user_assigned_identity.app.principal_id
 
   secret_permissions = ["Get"]
 }
@@ -202,7 +224,7 @@ resource "azurerm_key_vault_access_policy" "webapp_policy" {
 # a control-plane operation. Runs via the SQL AAD administrator identity above.
 resource "null_resource" "grant_app_sql_access" {
   triggers = {
-    principal_id = azurerm_linux_web_app.app.identity[0].principal_id
+    client_id = azurerm_user_assigned_identity.app.client_id
   }
 
   provisioner "local-exec" {
@@ -213,8 +235,10 @@ resource "null_resource" "grant_app_sql_access" {
       SQL_SERVER_NAME     = azurerm_mssql_server.sql.name
       RESOURCE_GROUP_NAME = azurerm_resource_group.demo.name
       SQL_DATABASE        = azurerm_mssql_database.db.name
-      APP_PRINCIPAL_NAME  = azurerm_linux_web_app.app.name
-      APP_PRINCIPAL_ID    = azurerm_linux_web_app.app.identity[0].principal_id
+      APP_PRINCIPAL_NAME  = azurerm_user_assigned_identity.app.name
+      # The *client* ID, not the principal/object ID — see the comment on
+      # azurerm_user_assigned_identity.app above.
+      APP_CLIENT_ID = azurerm_user_assigned_identity.app.client_id
     }
   }
 

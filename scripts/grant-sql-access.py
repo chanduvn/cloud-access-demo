@@ -24,11 +24,12 @@ Required environment variables:
   SQL_SERVER_NAME     e.g. sql-demo-abcd1234 (the resource name, not the FQDN)
   RESOURCE_GROUP_NAME e.g. rg-cloud-access-demo
   SQL_DATABASE        e.g. demodb
-  APP_PRINCIPAL_NAME  the database user name to create, e.g. the Web App's
-                      resource name (app-demo-abcd1234)
-  APP_PRINCIPAL_ID    that principal's AAD object ID (GUID) -- used to build the
-                      SID directly, avoiding a Microsoft Graph lookup (see the
-                      comment on CREATE USER below for why that matters)
+  APP_PRINCIPAL_NAME  the database user name to create, e.g. the managed
+                      identity's name (id-app-demo-abcd1234)
+  APP_CLIENT_ID       that identity's *application (client) ID* -- NOT its object
+                      /principal ID. Used to build the SID directly, avoiding a
+                      Microsoft Graph lookup; see the comment on CREATE USER below
+                      for why both of those details matter.
 """
 
 import os
@@ -127,7 +128,7 @@ def main() -> int:
     resource_group = os.environ["RESOURCE_GROUP_NAME"]
     database = os.environ["SQL_DATABASE"]
     principal = os.environ["APP_PRINCIPAL_NAME"]
-    principal_id = os.environ["APP_PRINCIPAL_ID"]
+    client_id = os.environ["APP_CLIENT_ID"]
 
     az = az_cli()
     my_ip = get_own_public_ip()
@@ -157,11 +158,18 @@ def main() -> int:
         # Azure SQL resolve the name against Microsoft Graph, and when the executing
         # identity is a service principal (our CI pipeline) rather than a human, the
         # SQL server's own identity needs the Directory Readers role to do that --
-        # which requires a Global Admin to grant. Creating the user directly from its
-        # AAD object ID as a SID needs no directory lookup at all, so it works
-        # regardless of tenant permissions. TYPE = E marks it an external AAD principal.
+        # which requires a Global Admin to grant. Building the SID ourselves needs no
+        # directory lookup at all, so it works regardless of tenant permissions.
+        # TYPE = E marks it an external AAD principal.
+        #
+        # The SID must come from the *application (client) ID*, not the object ID:
+        # Azure SQL identifies a service principal or managed identity by its client
+        # ID in the token. (Users and groups are the other way round -- object ID.)
+        # Getting this wrong yields a valid token that SQL rejects with
+        # "Login failed for user '<token-identified principal>'".
+        #
         # bytes_le matches the mixed-endian byte order SQL Server expects for a GUID.
-        sid = "0x" + uuid.UUID(principal_id).bytes_le.hex().upper()
+        sid = "0x" + uuid.UUID(client_id).bytes_le.hex().upper()
         cursor.execute(
             f"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ?) "
             f"CREATE USER [{safe_principal}] WITH SID = {sid}, TYPE = E",
