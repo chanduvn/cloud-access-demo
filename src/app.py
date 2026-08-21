@@ -4,15 +4,17 @@ from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
-# Fetch database credentials from Environment Variables (injected by Key Vault)
 DB_SERVER = os.environ.get('DB_SERVER')
 DB_DATABASE = os.environ.get('DB_DATABASE')
-DB_USERNAME = os.environ.get('DB_USERNAME')
-DB_PASSWORD = os.environ.get('DB_PASSWORD')
 
 def get_db_connection():
-    # Azure Linux Web Apps have the ODBC Driver 17 for SQL Server pre-installed
-    conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={DB_SERVER};DATABASE={DB_DATABASE};UID={DB_USERNAME};PWD={DB_PASSWORD}"
+    # Passwordless: authenticates as the Web App's own system-assigned managed
+    # identity via Azure AD, granted db_datareader/db_datawriter out-of-band by
+    # scripts/grant-sql-access.py. No password anywhere in this app.
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={DB_SERVER};DATABASE={DB_DATABASE};"
+        f"Authentication=ActiveDirectoryMsi;Encrypt=yes;"
+    )
     return pyodbc.connect(conn_str)
 
 # HTML Template for our simple form

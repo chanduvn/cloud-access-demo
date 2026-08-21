@@ -57,13 +57,22 @@ resource "azurerm_key_vault_access_policy" "terraform_operator" {
   secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
 }
 
-# Access for the demo operator (so terraform destroy works locally)
-# IMPORTANT: Replace this Object ID with your own Azure AD User Object ID.
-# Find yours by running: az ad signed-in-user show --query "id" -o tsv
+locals {
+  demo_operator_object_id = "39d8aa62-87be-4e64-9179-f0411bc70650"
+}
+
+# Access for the demo operator (so terraform destroy/browsing works locally even
+# when the vault was provisioned via CI). Skipped when whoever is currently running
+# Terraform already IS that identity (e.g. testing locally as the demo operator) —
+# Key Vault access policies are keyed by object_id, so two resources both targeting
+# the same one collide: this happened for real, both on create ("already exists")
+# and on destroy (one policy deleted from under the other before a dependent
+# resource's own operation completed).
 resource "azurerm_key_vault_access_policy" "demo_operator" {
+  count              = data.azurerm_client_config.current.object_id == local.demo_operator_object_id ? 0 : 1
   key_vault_id       = azurerm_key_vault.vault.id
   tenant_id          = data.azurerm_client_config.current.tenant_id
-  object_id          = "39d8aa62-87be-4e64-9179-f0411bc70650"
+  object_id          = local.demo_operator_object_id
   secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
 }
 
@@ -94,9 +103,19 @@ resource "azurerm_mssql_server" "sql" {
   location                     = "centralus"  # Most regions blocked for MSDN subs - centralus confirmed working
   version                      = "12.0"
   administrator_login          = "sqladmin"
-  
+
   # ***** - this is the static password Safeguard will rotate later!
-  administrator_login_password = azurerm_key_vault_secret.example.value 
+  administrator_login_password = azurerm_key_vault_secret.example.value
+
+  # Azure AD administrator — required before any AAD-based CREATE USER FROM
+  # EXTERNAL PROVIDER statement can run against a database on this server. Set to
+  # whoever runs Terraform (same identity as terraform_operator's Key Vault
+  # policy), so the same apply that provisions the app can also grant the app's
+  # managed identity database access (see grant_app_sql_access below).
+  azuread_administrator {
+    login_username = "terraform-pipeline-admin"
+    object_id      = data.azurerm_client_config.current.object_id
+  }
 }
 
 resource "azurerm_mssql_database" "db" {
@@ -120,6 +139,7 @@ resource "azurerm_mssql_firewall_rule" "allow_safeguard" {
   start_ip_address = "185.64.245.51"
   end_ip_address   = "185.64.245.51"
 }
+
 
 # ---------------------------------------------------------
 # NEW: APP SERVICE (WEB APP)
@@ -149,26 +169,57 @@ resource "azurerm_linux_web_app" "app" {
     type = "SystemAssigned"
   }
 
+  # No DB_PASSWORD: the app authenticates to SQL passwordlessly via its own managed
+  # identity (see grant_app_sql_access below) instead of a Key Vault-sourced secret.
   app_settings = {
     "SCM_DO_BUILD_DURING_DEPLOYMENT" = "true" # Tells Azure to install python requirements
     "DB_SERVER"                      = azurerm_mssql_server.sql.fully_qualified_domain_name
     "DB_DATABASE"                    = azurerm_mssql_database.db.name
-    "DB_USERNAME"                    = azurerm_mssql_server.sql.administrator_login
-    
-    # THE MAGIC: Native Key Vault Reference. The App securely fetches this at runtime!
-    "DB_PASSWORD"                    = "@Microsoft.KeyVault(VaultName=${azurerm_key_vault.vault.name};SecretName=${azurerm_key_vault_secret.example.name})"
   }
 }
 
 # ---------------------------------------------------------
 # NEW: GRANT WEB APP PERMISSION TO READ KEY VAULT
 # ---------------------------------------------------------
+# The web app no longer reads DB_PASSWORD from Key Vault (see app_settings above),
+# but it keeps Get access — the sqladmin secret is still there for break-glass /
+# Safeguard rotation, and this policy is cheap to leave in place for now.
 resource "azurerm_key_vault_access_policy" "webapp_policy" {
   key_vault_id = azurerm_key_vault.vault.id
   tenant_id    = azurerm_linux_web_app.app.identity[0].tenant_id
   object_id    = azurerm_linux_web_app.app.identity[0].principal_id
 
   secret_permissions = ["Get"]
+}
+
+# ---------------------------------------------------------
+# NEW: GRANT THE WEB APP'S MANAGED IDENTITY DATABASE ACCESS
+# ---------------------------------------------------------
+# No ARM/Terraform resource exists for "grant this AAD principal a role inside a
+# SQL database" — CREATE USER ... FROM EXTERNAL PROVIDER is data-plane T-SQL, not
+# a control-plane operation. Runs via the SQL AAD administrator identity above.
+resource "null_resource" "grant_app_sql_access" {
+  triggers = {
+    principal_id = azurerm_linux_web_app.app.identity[0].principal_id
+  }
+
+  provisioner "local-exec" {
+    command     = "python \"${path.module}/scripts/grant-sql-access.py\""
+    interpreter = ["bash", "-c"]
+    environment = {
+      SQL_SERVER_FQDN     = azurerm_mssql_server.sql.fully_qualified_domain_name
+      SQL_SERVER_NAME     = azurerm_mssql_server.sql.name
+      RESOURCE_GROUP_NAME = azurerm_resource_group.demo.name
+      SQL_DATABASE        = azurerm_mssql_database.db.name
+      APP_PRINCIPAL_NAME  = azurerm_linux_web_app.app.name
+    }
+  }
+
+  depends_on = [
+    azurerm_mssql_server.sql,
+    azurerm_mssql_database.db,
+    azurerm_mssql_firewall_rule.allow_azure,
+  ]
 }
 
 # ---------------------------------------------------------
@@ -188,4 +239,9 @@ output "db_password" {
   description = "SQL Server administrator password (from Key Vault)"
   value       = azurerm_key_vault_secret.example.value
   sensitive   = true
+}
+
+output "web_app_name" {
+  description = "Web App resource name — also its AAD login name for SQL access"
+  value       = azurerm_linux_web_app.app.name
 }
